@@ -273,6 +273,12 @@ button:disabled {
     will-change: transform;
 }
 
+#panorama-track .photo-wrapper {
+    position: relative;
+    height: 100%;
+    flex-shrink: 0;
+}
+
 #panorama-track img {
     height: 100%;
     width: auto;
@@ -281,7 +287,21 @@ button:disabled {
     user-select: none;
     -webkit-user-drag: none;
     pointer-events: none;
-    flex-shrink: 0;
+    display: block;
+}
+
+.photo-label {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    background: rgba(0,0,0,0.6);
+    color: white;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 16px;
+    font-weight: bold;
+    pointer-events: none;
+    z-index: 10;
 }
 
 .drag-hint {

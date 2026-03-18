@@ -286,10 +286,21 @@ function initViewer() {
     panoramaTrack.innerHTML = '';
     for (let i = 0; i < 3; i++) {
         photos.forEach((photo, idx) => {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'photo-wrapper';
+            
             const img = document.createElement('img');
             img.src = photo.url;
             img.draggable = false;
-            panoramaTrack.appendChild(img);
+            
+            // Debug label to show the user the strict ordering
+            const label = document.createElement('div');
+            label.className = 'photo-label';
+            label.textContent = photo.name; 
+            
+            wrapper.appendChild(img);
+            wrapper.appendChild(label);
+            panoramaTrack.appendChild(wrapper);
         });
     }
 
