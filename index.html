@@ -21,8 +21,8 @@
             <div class="form-group">
                 <label for="photo-upload">Upload Photos (12 required)</label>
                 <div class="file-drop-area">
-                    <span class="file-msg">Drag & drop files here or click to browse</span>
-                    <input type="file" id="photo-upload" multiple accept="image/*">
+                    <span class="file-msg">Drag & drop 12 images or a single Excel Audit (.xlsx) here</span>
+                    <input type="file" id="photo-upload" multiple accept="image/*,.xlsx">
                 </div>
                 <div id="file-count" class="info-text">0/12 selected</div>
             </div>
@@ -82,6 +82,9 @@
 
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- JSZip for Excel Parsing -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <!-- App Script -->
     <script src="app.js"></script>
 </body>
 </html>

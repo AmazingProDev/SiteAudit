@@ -26,8 +26,15 @@ const FOV_DEGREES = 30;
 
 // --- UPLOAD LOGIC ---
 
-photoUpload.addEventListener('change', (e) => {
+photoUpload.addEventListener('change', async (e) => {
     const files = Array.from(e.target.files);
+    
+    // Check if an Excel file is uploaded
+    const xlsxFile = files.find(file => file.name.toLowerCase().endsWith('.xlsx'));
+    if (xlsxFile) {
+        await handleExcelUpload(xlsxFile);
+        return;
+    }
     
     const imageFiles = files.filter(file => file.type.startsWith('image/'));
     
@@ -56,6 +63,184 @@ photoUpload.addEventListener('change', (e) => {
         generateBtn.disabled = true;
     }
 });
+
+async function handleExcelUpload(file) {
+    fileCount.textContent = `Analyzing Excel file...`;
+    generateBtn.disabled = true;
+    
+    try {
+        const zip = await JSZip.loadAsync(file);
+        const parser = new DOMParser();
+        
+        // 1. Read shared strings
+        const sstXmlObj = zip.file('xl/sharedStrings.xml');
+        let stringArray = [];
+        if (sstXmlObj) {
+            const sstText = await sstXmlObj.async('string');
+            const sstDoc = parser.parseFromString(sstText, "text/xml");
+            const siNodes = sstDoc.getElementsByTagName("si");
+            Array.from(siNodes).forEach((si) => {
+                const ts = si.getElementsByTagName("t");
+                let fullText = "";
+                for(let t of ts) fullText += t.textContent;
+                stringArray.push(fullText.trim());
+            });
+        }
+        
+        // 2. Discover Target Angle Strings
+        const targetAnglesStr = [];
+        for (let i = 0; i < 360; i += 30) {
+            targetAnglesStr.push(`${i} DEGRÉS`);
+        }
+        
+        let targetStringIndexes = {};
+        stringArray.forEach((s, idx) => {
+            const upperS = s.toUpperCase().replace(/\s+/g, ' '); 
+            if (targetAnglesStr.includes(upperS)) {
+                const angle = parseInt(upperS.split(' ')[0]);
+                targetStringIndexes[idx.toString()] = angle;
+            }
+        });
+
+        // 3. Find target cells in sheet1
+        const sheetXmlObj = zip.file('xl/worksheets/sheet1.xml');
+        if (!sheetXmlObj) throw new Error("Could not find sheet1.xml in .xlsx");
+        const sheetText = await sheetXmlObj.async('string');
+        const sheetDoc = parser.parseFromString(sheetText, "text/xml");
+        
+        let foundAngleCells = [];
+        const rows = sheetDoc.getElementsByTagName("row");
+        Array.from(rows).forEach(row => {
+            const rowNum = parseInt(row.getAttribute("r"));
+            const cells = row.getElementsByTagName("c");
+            Array.from(cells).forEach(c => {
+                if (c.getAttribute("t") === "s") {
+                    const v = c.getElementsByTagName("v")[0];
+                    if (v && targetStringIndexes[v.textContent]) {
+                        const cRef = c.getAttribute("r");
+                        const colStr = cRef.replace(/[0-9]/g, '');
+                        foundAngleCells.push({
+                            row: rowNum,
+                            colStr: colStr,
+                            angle: targetStringIndexes[v.textContent]
+                        });
+                    }
+                }
+            });
+        });
+        
+        let angleRows = {};
+        foundAngleCells.forEach(fc => {
+            angleRows[fc.row] = angleRows[fc.row] || [];
+            angleRows[fc.row].push(fc);
+        });
+
+        // 4. Drawing Rels Mapping
+        const relsXmlObj = zip.file('xl/drawings/_rels/drawing1.xml.rels');
+        let drawingRels = {};
+        if (relsXmlObj) {
+            const relsText = await relsXmlObj.async('string');
+            const relsDoc = parser.parseFromString(relsText, "text/xml");
+            const rels = relsDoc.getElementsByTagName("Relationship");
+            Array.from(rels).forEach(r => {
+                drawingRels[r.getAttribute("Id")] = r.getAttribute("Target");
+            });
+        }
+        
+        // 5. Drawing Anchor matching
+        const drawXmlObj = zip.file('xl/drawings/drawing1.xml');
+        if (!drawXmlObj) throw new Error("Could not find drawing1.xml");
+        const drawText = await drawXmlObj.async('string');
+        const drawDoc = parser.parseFromString(drawText, "text/xml");
+        const anchors1 = drawDoc.getElementsByTagName("xdr:twoCellAnchor");
+        const anchors2 = drawDoc.getElementsByTagName("twoCellAnchor");
+        const anchors = anchors1.length > 0 ? anchors1 : anchors2;
+        
+        Array.from(anchors).forEach(anchor => {
+            const from = anchor.getElementsByTagName("xdr:from")[0] || anchor.getElementsByTagName("from")[0];
+            if (from) {
+                const rowNode = from.getElementsByTagName("xdr:row")[0] || from.getElementsByTagName("row")[0];
+                const colNode = from.getElementsByTagName("xdr:col")[0] || from.getElementsByTagName("col")[0];
+                
+                if (rowNode && colNode) {
+                    const imgRow = parseInt(rowNode.textContent);
+                    const imgColRaw = parseInt(colNode.textContent);
+                    
+                    if (angleRows[imgRow]) {
+                        const blip1 = anchor.getElementsByTagName("a:blip")[0];
+                        const blip2 = anchor.getElementsByTagName("blip")[0];
+                        const blip = blip1 || blip2;
+                        if (blip) {
+                            const rId = blip.getAttribute("r:embed");
+                            if (rId && drawingRels[rId]) {
+                                if (!angleRows[imgRow].images) angleRows[imgRow].images = [];
+                                angleRows[imgRow].images.push({ col: imgColRaw, target: drawingRels[rId] });
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
+        // 6. Match labels to images by column ordering
+        let extractedImages = [];
+        Object.keys(angleRows).forEach(rowStr => {
+            const rowData = angleRows[rowStr];
+            const images = rowData.images || [];
+            
+            rowData.sort((a, b) => {
+                if(a.colStr.length !== b.colStr.length) return a.colStr.length - b.colStr.length;
+                return a.colStr.localeCompare(b.colStr);
+            });
+            images.sort((a, b) => a.col - b.col);
+            
+            for (let i = 0; i < Math.min(rowData.length, images.length); i++) {
+                extractedImages.push({
+                    angle: rowData[i].angle,
+                    target: images[i].target 
+                });
+            }
+        });
+        
+        if (extractedImages.length < 12) {
+            throw new Error(`Only found ${extractedImages.length}/12 panoramic photos. Expected 12 images correctly anchored under 'DEGRÉS' cells.`);
+        }
+        
+        // 7. Load Binaries and Build Photos Array
+        photos = [];
+        for (let i = 0; i < extractedImages.length; i++) {
+            const item = extractedImages[i];
+            let mediaPath = item.target.startsWith('../') ? item.target.substring(3) : item.target;
+            mediaPath = 'xl/' + mediaPath; 
+            
+            const mediaFile = zip.file(mediaPath);
+            if (mediaFile) {
+                const ext = mediaPath.split('.').pop().toLowerCase();
+                let mime = 'image/jpeg';
+                if (ext === 'png') mime = 'image/png';
+                
+                const blob = await mediaFile.async('blob');
+                const typedBlob = new Blob([blob], { type: mime });
+                
+                photos.push({
+                    file: typedBlob,
+                    url: URL.createObjectURL(typedBlob),
+                    name: `Angle_${item.angle}°`,
+                    angle: item.angle
+                });
+            }
+        }
+        
+        photos.sort((a, b) => a.angle - b.angle);
+        fileCount.textContent = `Successfully extracted ${photos.length} exact panoramic images from Exce!`;
+        generateBtn.disabled = false;
+        
+    } catch (err) {
+        console.error(err);
+        fileCount.textContent = "Error parsing Excel: " + err.message;
+        generateBtn.disabled = true;
+    }
+}
 
 generateBtn.addEventListener('click', () => {
     const rawLat = parseFloat(latInput.value);
