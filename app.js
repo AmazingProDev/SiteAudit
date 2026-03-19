@@ -37,6 +37,12 @@ let viewCone = null;
 // The field of view of a single photo
 const FOV_DEGREES = 30;
 
+let mapTx = 0;
+let mapTy = 0;
+let lastOriginX = null;
+let lastOriginY = null;
+let lastAngle = 0;
+
 // --- UPLOAD LOGIC ---
 
 photoUpload.addEventListener('change', async (e) => {
