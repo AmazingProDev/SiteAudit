@@ -35,7 +35,6 @@ let siteMarker = null;
 let viewCone = null;
 
 // The field of view of a single photo
-let previousDragX = null;
 
 // --- UPLOAD LOGIC ---
 
@@ -593,7 +592,7 @@ function applyAngleToTrack() {
         updateViewCone();
         
         // Rotate the map safely around the CGPS marker's accurate screen location
-        const mapWrapper = document.getElementById('map-wrapper');
+                const mapWrapper = document.getElementById('map-wrapper');
         if (mapWrapper) {
             const pt = map.latLngToContainerPoint(siteLocation);
             const cx = mapWrapper.offsetWidth / 2;
@@ -603,14 +602,12 @@ function applyAngleToTrack() {
             const vy = pt.y - cy;
             
             const rad = (-currentAngle) * (Math.PI / 180);
-            
             const rx = vx * Math.cos(rad) - vy * Math.sin(rad);
             const ry = vx * Math.sin(rad) + vy * Math.cos(rad);
             
             const tx = vx - rx;
             const ty = vy - ry;
             
-            mapWrapper.style.transformOrigin = `center center`;
             mapWrapper.style.transform = `translate(${tx}px, ${ty}px) rotate(${-currentAngle}deg)`;
         }
         
@@ -657,7 +654,15 @@ function updateSectorMapPolygons() {
     sectorPolygons.forEach(p => map.removeLayer(p));
     sectorPolygons = [];
     
-    const config = radioConfig[activeConfigStr] || [];
+    let config = radioConfig[activeConfigStr] || [];
+    
+    if (config.length === 0) {
+       config = [
+           { name: 'Secteur 1', azimuth: 50 },
+           { name: 'Secteur 2', azimuth: 130 },
+           { name: 'Secteur 3', azimuth: 220 }
+       ];
+    }
     
     if (hudAzimuts) {
         const azList = config.map(c => c.azimuth).filter(a => a !== null);
@@ -786,31 +791,26 @@ function destinationPoint(lat, lng, bearingDeg, distanceM) {
 // --- Custom Rotation-Aware Map Panning ---
 const mapPanelDOM = document.querySelector('.map-panel');
 let isPanningMap = false;
+let mapOuterTx = 0;
+let mapOuterTy = 0;
 
 mapPanelDOM.addEventListener('mousedown', (e) => {
     if (e.target.closest('.leaflet-control') || e.target.closest('#map-info-hud') || e.target.closest('#site-name-hud') || e.target.closest('#compass-overlay')) return;
-    if (e.button !== 0) return; // Only left click
+    if (e.button !== 0) return; 
     isPanningMap = true;
 });
 
 window.addEventListener('mousemove', (e) => {
     if (!isPanningMap || !map) return;
-    
-    const dx = e.movementX;
-    const dy = e.movementY;
-    
-    // Stateless mapping completely organically negates visual axis decoupling!
-    map.panBy([-dx, -dy], {animate: false});
+    mapOuterTx += e.movementX;
+    mapOuterTy += e.movementY;
+    const outer = document.getElementById('map-outer-wrapper');
+    if(outer) outer.style.transform = `translate(${mapOuterTx}px, ${mapOuterTy}px)`;
 });
 
-window.addEventListener('mouseup', () => {
-    isPanningMap = false;
-});
+window.addEventListener('mouseup', () => { isPanningMap = false; });
 
-// Basic Touch Support
-let lastTouchX = null;
-let lastTouchY = null;
-
+let lastTouchX = null; let lastTouchY = null;
 mapPanelDOM.addEventListener('touchstart', (e) => {
     if (e.target.closest('.leaflet-control') || e.target.closest('#map-info-hud') || e.target.closest('#site-name-hud') || e.target.closest('#compass-overlay')) return;
     if (e.touches.length === 1) {
@@ -823,18 +823,12 @@ mapPanelDOM.addEventListener('touchstart', (e) => {
 mapPanelDOM.addEventListener('touchmove', (e) => {
     if (!isPanningMap || !map || e.touches.length !== 1) return;
     e.preventDefault(); 
-    
-    const dx = e.touches[0].clientX - lastTouchX;
-    const dy = e.touches[0].clientY - lastTouchY;
-    
+    mapOuterTx += (e.touches[0].clientX - lastTouchX);
+    mapOuterTy += (e.touches[0].clientY - lastTouchY);
     lastTouchX = e.touches[0].clientX;
     lastTouchY = e.touches[0].clientY;
-    
-    map.panBy([-dx, -dy], {animate: false});
+    const outer = document.getElementById('map-outer-wrapper');
+    if(outer) outer.style.transform = `translate(${mapOuterTx}px, ${mapOuterTy}px)`;
 }, {passive: false});
 
-mapPanelDOM.addEventListener('touchend', () => {
-    isPanningMap = false;
-    lastTouchX = null;
-    lastTouchY = null;
-});
+mapPanelDOM.addEventListener('touchend', () => { isPanningMap = false; lastTouchX = null; lastTouchY = null; });

@@ -6,7 +6,7 @@
     <title>360° Telecom Site Audit Viewer</title>
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=3">
     <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
@@ -83,8 +83,10 @@
                     <div class="hud-row"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m16 10-4-6-4 6"/><path d="M12 4v16"/></svg> <span id="hud-direction">--</span></div>
                     <div class="hud-row"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/><circle cx="12" cy="12" r="4"/></svg> <span id="hud-azimuts">--</span></div>
                 </div>
-                <div id="map-wrapper">
-                    <div id="map"></div>
+                <div id="map-outer-wrapper" style="position: absolute; width: 100%; height: 100%; top: 0; left: 0; pointer-events: none; will-change: transform; z-index: 10;">
+                    <div id="map-wrapper" style="position: absolute; width: 300%; height: 300%; top: -100%; left: -100%; pointer-events: auto; transform-origin: center center;">
+                        <div id="map" style="width: 100%; height: 100%;"></div>
+                    </div>
                 </div>
                 <!-- Mini Compass Overlay -->
                 <div id="compass-overlay">
