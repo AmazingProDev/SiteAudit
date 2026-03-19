@@ -799,11 +799,8 @@ window.addEventListener('mousemove', (e) => {
     const dx = e.movementX;
     const dy = e.movementY;
     
-    const rad = (-currentAngle) * (Math.PI / 180);
-    const ix = dx * Math.cos(rad) - dy * Math.sin(rad);
-    const iy = dx * Math.sin(rad) + dy * Math.cos(rad);
-    
-    map.panBy([-ix, -iy], {animate: false});
+    // Stateless mapping completely organically negates visual axis decoupling!
+    map.panBy([-dx, -dy], {animate: false});
 });
 
 window.addEventListener('mouseup', () => {
@@ -833,11 +830,7 @@ mapPanelDOM.addEventListener('touchmove', (e) => {
     lastTouchX = e.touches[0].clientX;
     lastTouchY = e.touches[0].clientY;
     
-    const rad = (-currentAngle) * (Math.PI / 180);
-    const ix = dx * Math.cos(rad) - dy * Math.sin(rad);
-    const iy = dx * Math.sin(rad) + dy * Math.cos(rad);
-    
-    map.panBy([-ix, -iy], {animate: false});
+    map.panBy([-dx, -dy], {animate: false});
 }, {passive: false});
 
 mapPanelDOM.addEventListener('touchend', () => {
