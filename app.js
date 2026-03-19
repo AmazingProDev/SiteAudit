@@ -35,6 +35,7 @@ let siteMarker = null;
 let viewCone = null;
 
 // The field of view of a single photo
+const FOV_DEGREES = 30;
 
 // --- UPLOAD LOGIC ---
 
