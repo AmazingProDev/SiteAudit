@@ -23,6 +23,8 @@ const configSelect = document.getElementById('config-select');
 const sectorHud = document.getElementById('sector-hud');
 const sectorHudTitle = document.getElementById('sector-hud-title');
 const sectorHudImg = document.getElementById('sector-hud-img');
+const hudCgps = document.getElementById('hud-cgps');
+const hudAzimuth = document.getElementById('hud-azimuth');
 let sectorPolygons = []; // map layers
 
 // Map Objects
@@ -376,6 +378,7 @@ async function handleExcelUpload(file) {
         if (cgpsLat !== null && cgpsLng !== null) {
             latInput.value = cgpsLat;
             lngInput.value = cgpsLng;
+            if (hudCgps) hudCgps.textContent = `${cgpsLat.toFixed(6)}, ${cgpsLng.toFixed(6)}`;
         }
         
         if (radioConfig.avant.length > 0 || radioConfig.apres.length > 0) {
@@ -569,9 +572,11 @@ function applyAngleToTrack() {
     
     const displayAngle = Math.round(currentAngle);
     angleBadge.textContent = 'Azimuth: ' + displayAngle + '°';
+    if (hudAzimuth) hudAzimuth.textContent = `${displayAngle}°`;
     
     if (map) {
-        map.setView(siteLocation, map.getZoom(), {animate: false}); // Mathematical enforcement of pivot center
+        // Gently snap the map back to the CGPS pivot when dragging the 360 view
+        map.setView(siteLocation, map.getZoom(), {animate: true, duration: 0.25}); 
         updateViewCone();
         
         // Rotate the map wrapper to simulate heading up
@@ -655,7 +660,7 @@ function updateSectorMapPolygons() {
 function initMap() {
     map = L.map('map', {
         zoomControl: false,
-        dragging: false,            // Lock map panning to firmly keep the site dot perfectly anchored
+        dragging: true,             // Enabled per user request to roam left/right/up/down
         scrollWheelZoom: 'center'   // Force scroll zooms to anchor exactly on the center marker 
     });
     

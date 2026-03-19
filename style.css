@@ -303,6 +303,25 @@ button:disabled {
     max-height: 350px;
 }
 
+.map-info-hud {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    background: rgba(10, 10, 10, 0.7);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    padding: 10px 15px;
+    color: #4da3ff;
+    font-size: 13px;
+    font-weight: bold;
+    font-family: monospace;
+    z-index: 1000;
+    pointer-events: none;
+    line-height: 1.5;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+}
+
 /* === VIEWER LAYOUT === */
 /* 360 Video Panel */
 .photo-panel {
