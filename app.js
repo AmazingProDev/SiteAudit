@@ -732,6 +732,9 @@ function initMap() {
     
     updateViewCone();
     updateSectorMapPolygons();
+    
+    // Bind moving to continuously lock the flawless stateless tracking algorithm!
+    map.on('move', applyAngleToTrack);
 }
 
 function updateViewCone() {
@@ -779,3 +782,66 @@ function destinationPoint(lat, lng, bearingDeg, distanceM) {
                                  
     return [lat2 * 180 / Math.PI, lon2 * 180 / Math.PI];
 }
+
+// --- Custom Rotation-Aware Map Panning ---
+const mapPanelDOM = document.querySelector('.map-panel');
+let isPanningMap = false;
+
+mapPanelDOM.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.leaflet-control') || e.target.closest('#map-info-hud') || e.target.closest('#site-name-hud') || e.target.closest('#compass-overlay')) return;
+    if (e.button !== 0) return; // Only left click
+    isPanningMap = true;
+});
+
+window.addEventListener('mousemove', (e) => {
+    if (!isPanningMap || !map) return;
+    
+    const dx = e.movementX;
+    const dy = e.movementY;
+    
+    const rad = (-currentAngle) * (Math.PI / 180);
+    const ix = dx * Math.cos(rad) - dy * Math.sin(rad);
+    const iy = dx * Math.sin(rad) + dy * Math.cos(rad);
+    
+    map.panBy([-ix, -iy], {animate: false});
+});
+
+window.addEventListener('mouseup', () => {
+    isPanningMap = false;
+});
+
+// Basic Touch Support
+let lastTouchX = null;
+let lastTouchY = null;
+
+mapPanelDOM.addEventListener('touchstart', (e) => {
+    if (e.target.closest('.leaflet-control') || e.target.closest('#map-info-hud') || e.target.closest('#site-name-hud') || e.target.closest('#compass-overlay')) return;
+    if (e.touches.length === 1) {
+        isPanningMap = true;
+        lastTouchX = e.touches[0].clientX;
+        lastTouchY = e.touches[0].clientY;
+    }
+}, {passive: false});
+
+mapPanelDOM.addEventListener('touchmove', (e) => {
+    if (!isPanningMap || !map || e.touches.length !== 1) return;
+    e.preventDefault(); 
+    
+    const dx = e.touches[0].clientX - lastTouchX;
+    const dy = e.touches[0].clientY - lastTouchY;
+    
+    lastTouchX = e.touches[0].clientX;
+    lastTouchY = e.touches[0].clientY;
+    
+    const rad = (-currentAngle) * (Math.PI / 180);
+    const ix = dx * Math.cos(rad) - dy * Math.sin(rad);
+    const iy = dx * Math.sin(rad) + dy * Math.cos(rad);
+    
+    map.panBy([-ix, -iy], {animate: false});
+}, {passive: false});
+
+mapPanelDOM.addEventListener('touchend', () => {
+    isPanningMap = false;
+    lastTouchX = null;
+    lastTouchY = null;
+});
