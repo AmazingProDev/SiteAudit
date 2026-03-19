@@ -595,25 +595,35 @@ function applyAngleToTrack() {
         // Rotate the map safely around the CGPS marker's accurate screen location
         const mapWrapper = document.getElementById('map-wrapper');
         if (mapWrapper) {
-            // Apply mathematical vector compensation to keep the offset marker strictly locked 
-            // visually in place on the window while revolving around the structural center!
             const pt = map.latLngToContainerPoint(siteLocation);
-            const cx = mapWrapper.offsetWidth / 2;
-            const cy = mapWrapper.offsetHeight / 2;
             
-            const vx = pt.x - cx;
-            const vy = pt.y - cy;
+            if (lastOriginX === null) {
+                lastOriginX = pt.x;
+                lastOriginY = pt.y;
+                lastAngle = currentAngle;
+            }
             
-            const rad = (-currentAngle) * (Math.PI / 180);
+            if (pt.x !== lastOriginX || pt.y !== lastOriginY) {
+                const dx = pt.x - lastOriginX;
+                const dy = pt.y - lastOriginY;
+                
+                const rad = (-lastAngle) * (Math.PI / 180);
+                const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
+                const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
+                
+                const jx = dx - rx;
+                const jy = dy - ry;
+                
+                mapTx -= jx;
+                mapTy -= jy;
+                
+                lastOriginX = pt.x;
+                lastOriginY = pt.y;
+            }
             
-            const rx = vx * Math.cos(rad) - vy * Math.sin(rad);
-            const ry = vx * Math.sin(rad) + vy * Math.cos(rad);
-            
-            const tx = vx - rx;
-            const ty = vy - ry;
-            
-            mapWrapper.style.transformOrigin = `center center`;
-            mapWrapper.style.transform = `translate(${tx}px, ${ty}px) rotate(${-currentAngle}deg)`;
+            mapWrapper.style.transformOrigin = `${pt.x}px ${pt.y}px`;
+            mapWrapper.style.transform = `translate(${mapTx}px, ${mapTy}px) rotate(${-currentAngle}deg)`;
+            lastAngle = currentAngle;
         }
         
         // Rotate the compass arrow to indicate where north is
