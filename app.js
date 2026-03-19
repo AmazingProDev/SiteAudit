@@ -592,12 +592,28 @@ function applyAngleToTrack() {
     if (map) {
         updateViewCone();
         
-        // Rotate the map wrapper securely around the CGPS marker's accurate screen location!
+        // Rotate the map safely around the CGPS marker's accurate screen location
         const mapWrapper = document.getElementById('map-wrapper');
         if (mapWrapper) {
+            // Apply mathematical vector compensation to keep the offset marker strictly locked 
+            // visually in place on the window while revolving around the structural center!
             const pt = map.latLngToContainerPoint(siteLocation);
-            mapWrapper.style.transformOrigin = `${pt.x}px ${pt.y}px`;
-            mapWrapper.style.transform = `rotate(${-currentAngle}deg)`;
+            const cx = mapWrapper.offsetWidth / 2;
+            const cy = mapWrapper.offsetHeight / 2;
+            
+            const vx = pt.x - cx;
+            const vy = pt.y - cy;
+            
+            const rad = (-currentAngle) * (Math.PI / 180);
+            
+            const rx = vx * Math.cos(rad) - vy * Math.sin(rad);
+            const ry = vx * Math.sin(rad) + vy * Math.cos(rad);
+            
+            const tx = vx - rx;
+            const ty = vy - ry;
+            
+            mapWrapper.style.transformOrigin = `center center`;
+            mapWrapper.style.transform = `translate(${tx}px, ${ty}px) rotate(${-currentAngle}deg)`;
         }
         
         // Rotate the compass arrow to indicate where north is
