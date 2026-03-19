@@ -306,7 +306,7 @@ button:disabled {
 .map-info-hud {
     position: absolute;
     top: 15px;
-    right: 15px;
+    right: 80px; /* Shifted left to clear the compass icon */
     background: rgba(10, 10, 10, 0.7);
     backdrop-filter: blur(10px);
     border: 1px solid rgba(255, 255, 255, 0.15);
