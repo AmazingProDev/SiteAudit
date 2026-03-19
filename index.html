@@ -41,7 +41,10 @@
 
     <!-- Viewer Screen -->
     <div id="viewer-screen" class="screen">
-        <button id="restart-btn" style="width: 100%; background: #4da3ff; color: white; border: none; padding: 18px; font-size: 24px; font-weight: bold; cursor: pointer; text-align: center; border-radius: 0; box-shadow: 0 4px 10px rgba(0,0,0,0.5); z-index: 1000; position: relative;">New Audit</button>
+        <button id="restart-btn" style="width: 100%; background: linear-gradient(90deg, #1f6feb, #4da3ff); color: white; border: none; padding: 18px; font-size: 20px; font-weight: 700; letter-spacing: 1px; cursor: pointer; text-align: center; border-radius: 0; box-shadow: 0 4px 20px rgba(0,0,0,0.6); z-index: 1000; position: relative; transition: all 0.3s ease; display: flex; align-items: center; justify-content: center; gap: 10px;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            NEW SITE AUDIT
+        </button>
 
         <div style="display: none;">
             <h1 class="logo">360° Telecom Site Audit View</h1>
@@ -76,16 +79,19 @@
                     <span id="display-site-name">Unknown Site</span>
                 </div>
                 <div id="map-info-hud" class="map-info-hud">
-                    CGPS: <span id="hud-cgps">--</span><br>
-                    Direction: <span id="hud-direction">--</span><br>
-                    Azimuts: <span id="hud-azimuts">--</span>
+                    <div class="hud-row"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/><circle cx="12" cy="10" r="3"/></svg> <span id="hud-cgps">--</span></div>
+                    <div class="hud-row"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m16 10-4-6-4 6"/><path d="M12 4v16"/></svg> <span id="hud-direction">--</span></div>
+                    <div class="hud-row"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/><circle cx="12" cy="12" r="4"/></svg> <span id="hud-azimuts">--</span></div>
                 </div>
                 <div id="map-wrapper">
                     <div id="map"></div>
                 </div>
                 <!-- Mini Compass Overlay -->
                 <div id="compass-overlay">
-                    <div class="compass-arrow">↑</div>
+                    <svg class="compass-arrow" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2l4 10-4-2-4 2 4-10z" fill="#ff3333" stroke="#ff3333"/>
+                        <path d="M12 22l-4-10 4 2 4-2-4 10z" fill="#ffffff" stroke="#ffffff"/>
+                    </svg>
                     <div class="compass-label">N</div>
                 </div>
             </div>

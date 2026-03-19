@@ -323,22 +323,36 @@ button:disabled {
 
 .map-info-hud {
     position: absolute;
-    top: 15px;
-    right: 80px; /* Shifted left to clear the compass icon */
-    background: rgba(10, 10, 10, 0.7);
-    backdrop-filter: blur(10px);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 8px;
-    padding: 10px 15px;
-    color: #4da3ff;
+    top: 20px;
+    right: 85px; 
+    background: rgba(14, 18, 25, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(77, 163, 255, 0.2);
+    border-radius: 12px;
+    padding: 12px 18px;
+    color: #a3cfff;
     font-size: 13px;
-    font-weight: bold;
-    font-family: monospace;
+    font-weight: 500;
+    font-family: 'Inter', monospace;
     z-index: 1000;
     pointer-events: none;
-    line-height: 1.5;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.6);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
+
+.hud-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.hud-row span {
+    font-weight: 700;
+    color: #ffffff;
+}
+
 
 /* === VIEWER LAYOUT === */
 /* 360 Video Panel */
@@ -471,12 +485,12 @@ button:disabled {
     position: absolute;
     top: 20px;
     right: 20px;
-    width: 48px;
-    height: 48px;
-    background: var(--glass-bg);
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
-    border: 1px solid var(--glass-border);
+    width: 55px;
+    height: 55px;
+    background: rgba(14, 18, 25, 0.85);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(77, 163, 255, 0.3);
     border-radius: 50%;
     display: flex;
     flex-direction: column;
@@ -484,7 +498,7 @@ button:disabled {
     align-items: center;
     z-index: 1000;
     pointer-events: none;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    box-shadow: inset 0 0 15px rgba(0,0,0,0.8), 0 6px 16px rgba(0,0,0,0.6);
 }
 
 .compass-arrow {
