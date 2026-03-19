@@ -695,6 +695,112 @@ function updateSectorMapPolygons() {
     });
 }
 
+// --- KML EXPORT ---
+
+document.getElementById('export-kml-btn').addEventListener('click', exportKML);
+
+function exportKML() {
+    const siteName = displaySiteName ? displaySiteName.textContent : 'Unknown Site';
+    const lat = siteLocation[0];
+    const lng = siteLocation[1];
+    
+    let config = radioConfig[activeConfigStr] || [];
+    if (config.length === 0) {
+        config = [
+            { name: 'Secteur 1', azimuth: 50 },
+            { name: 'Secteur 2', azimuth: 130 },
+            { name: 'Secteur 3', azimuth: 220 }
+        ];
+    }
+    
+    const distanceMeters = 80;
+    const fov = 60;
+    
+    // Build sector placemarks
+    let sectorPlacemarks = '';
+    const colors = ['ff0000ff', 'ff00ff00', 'ffff0000']; // KML AABBGGRR
+    
+    config.forEach((sector, i) => {
+        if (sector.azimuth === null) return;
+        
+        const leftA = sector.azimuth - fov / 2;
+        const rightA = sector.azimuth + fov / 2;
+        
+        let coords = `${lng},${lat},0\n`;
+        for (let a = leftA; a <= rightA; a += 5) {
+            const pt = destinationPoint(lat, lng, a, distanceMeters);
+            coords += `          ${pt[1]},${pt[0]},0\n`;
+        }
+        const lastPt = destinationPoint(lat, lng, rightA, distanceMeters);
+        coords += `          ${lastPt[1]},${lastPt[0]},0\n`;
+        coords += `          ${lng},${lat},0`;
+        
+        const color = colors[i % colors.length];
+        
+        sectorPlacemarks += `
+    <Placemark>
+      <name>${sector.name} (${sector.azimuth}°)</name>
+      <description>Azimuth: ${sector.azimuth}° | Beamwidth: ${fov}°</description>
+      <Style>
+        <LineStyle><color>${color}</color><width>2</width></LineStyle>
+        <PolyStyle><color>40${color.substring(2)}</color></PolyStyle>
+      </Style>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+          ${coords}
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>`;
+    });
+    
+    const azListStr = config.map(c => `${c.name}: ${c.azimuth}°`).join(' | ');
+    
+    const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>${siteName} - Site Audit</name>
+    <description>360° Telecom Site Audit Export
+CGPS: ${lat.toFixed(6)}, ${lng.toFixed(6)}
+${azListStr}
+Config: ${activeConfigStr === 'avant' ? 'Avant Optimisation' : 'Après Optimisation'}</description>
+    
+    <Style id="siteIcon">
+      <IconStyle>
+        <color>ffff7700</color>
+        <scale>1.2</scale>
+        <Icon><href>http://maps.google.com/mapfiles/kml/shapes/target.png</href></Icon>
+      </IconStyle>
+      <LabelStyle><color>ffffffff</color><scale>1</scale></LabelStyle>
+    </Style>
+    
+    <Placemark>
+      <name>${siteName}</name>
+      <description>CGPS: ${lat.toFixed(6)}, ${lng.toFixed(6)}
+Azimuths: ${config.map(c => c.azimuth + '°').join(' / ')}</description>
+      <styleUrl>#siteIcon</styleUrl>
+      <Point>
+        <coordinates>${lng},${lat},0</coordinates>
+      </Point>
+    </Placemark>
+    ${sectorPlacemarks}
+  </Document>
+</kml>`;
+    
+    const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${siteName.replace(/[^a-zA-Z0-9_-]/g, '_')}_audit.kml`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
 // --- MAP LOGIC ---
 
 function initMap() {
