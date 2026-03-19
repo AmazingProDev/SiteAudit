@@ -694,8 +694,9 @@ function updateSectorMapPolygons() {
 function initMap() {
     map = L.map('map', {
         zoomControl: false,
-        dragging: true,             // Enabled per user request to roam left/right/up/down
-        scrollWheelZoom: 'center'   // Force scroll zooms to anchor exactly on the center marker 
+        dragging: false,             // Locked to force custom rotational vector math
+        scrollWheelZoom: 'center',   // Force scroll zooms to anchor exactly on origin
+        touchZoom: 'center'          // Force mobile pinch-zoom to anchor on origin
     });
     
     // Use ResizeObserver for bulletproof map sizing when layout changes
