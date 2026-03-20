@@ -6,44 +6,51 @@
     <title>360° Telecom Site Audit Viewer</title>
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="style.css?v=3">
+    <link rel="stylesheet" href="style.css?v=22">
     <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
 </head>
 <body>
 
     <!-- Setup Screen -->
     <div id="setup-screen" class="screen active">
+        <div class="setup-glow setup-glow-one"></div>
+        <div class="setup-glow setup-glow-two"></div>
+        <div class="setup-grid"></div>
         <div class="setup-card glass-panel">
-            <h1>Site Audit Configuration</h1>
-            <p class="subtitle">Upload 12 photos (taken every 30°) and enter the site's center coordinates.</p>
-            
-            <div class="form-group">
-                <label for="photo-upload">Upload Photos (12 required)</label>
-                <div class="file-drop-area">
-                    <span class="file-msg">Drag & drop 12 images or a single Excel Audit (.xlsx) here</span>
-                    <input type="file" id="photo-upload" multiple accept="image/*,.xlsx">
-                </div>
-                <div id="file-count" class="info-text">0/12 selected</div>
+            <h1>Automatic SSV and SA validation</h1>
+
+            <div class="validation-entry-actions">
+                <button id="setup-ssv-btn" type="button" class="validation-entry-btn validation-entry-primary" data-ssv-open>SSV validation</button>
+                <button id="setup-sa-btn" type="button" class="validation-entry-btn validation-entry-secondary secondary-action-btn">SA validation</button>
             </div>
 
-            <div class="form-group" style="display: none;">
-                <label>Central GPS Coordinates</label>
-                <div class="input-row">
-                    <input type="number" id="lat-input" step="any" placeholder="Latitude (e.g. 48.8584)" value="48.8584">
-                    <input type="number" id="lng-input" step="any" placeholder="Longitude (e.g. 2.2945)" value="2.2945">
+            <div class="legacy-upload-shell" hidden>
+                <div class="form-group">
+                    <label for="photo-upload">Upload Photos (12 required)</label>
+                    <div class="file-drop-area">
+                        <span class="file-msg">Drag & drop 12 images or a single Excel Audit (.xlsx) here</span>
+                        <input type="file" id="photo-upload" multiple accept="image/*,.xlsx">
+                    </div>
+                    <div id="file-count" class="info-text">0/12 selected</div>
                 </div>
-            </div>
 
-            <button id="generate-btn" disabled>Generate 360° View</button>
+                <div class="form-group" style="display: none;">
+                    <label>Central GPS Coordinates</label>
+                    <div class="input-row">
+                        <input type="number" id="lat-input" step="any" placeholder="Latitude (e.g. 48.8584)" value="48.8584">
+                        <input type="number" id="lng-input" step="any" placeholder="Longitude (e.g. 2.2945)" value="2.2945">
+                    </div>
+                </div>
+
+                <button id="generate-btn" disabled>Generate 360° View</button>
+            </div>
         </div>
     </div>
 
     <!-- Viewer Screen -->
     <div id="viewer-screen" class="screen">
-        <button id="restart-btn" style="width: 100%; background: linear-gradient(90deg, #1f6feb, #4da3ff); color: white; border: none; padding: 18px; font-size: 20px; font-weight: 700; letter-spacing: 1px; cursor: pointer; text-align: center; border-radius: 0; box-shadow: 0 4px 20px rgba(0,0,0,0.6); z-index: 1000; position: relative; transition: all 0.3s ease; display: flex; align-items: center; justify-content: center; gap: 10px;">
-            NEW SITE AUDIT
-        </button>
+        <button id="restart-btn" type="button" style="width: 100%; background: linear-gradient(90deg, #1f6feb, #4da3ff); color: white; border: none; padding: 18px; font-size: 20px; font-weight: 700; letter-spacing: 1px; cursor: pointer; text-align: center; border-radius: 0; box-shadow: 0 4px 20px rgba(0,0,0,0.6); z-index: 1000; position: relative; transition: all 0.3s ease; display: flex; align-items: center; justify-content: center; gap: 10px;">Home</button>
 
         <div style="display: none;">
             <h1 class="logo">360° Telecom Site Audit View</h1>
@@ -76,10 +83,39 @@
             <div class="panel map-panel">
                 <div id="site-name-hud" class="site-name-hud">
                     <span id="display-site-name">Unknown Site</span>
-                    <button id="export-kml-btn" title="Export to Google Earth">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                        KML
-                    </button>
+                    <div class="site-name-actions">
+                        <button id="export-kml-btn" title="Export to Google Earth">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            KML
+                        </button>
+                        <button id="add-bdd-btn" title="Load BDD 2G/3G/4G">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
+                            Add BDD
+                        </button>
+                        <button id="check-neighbors-btn" title="Check Neighbors">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+                            Check Neighbors
+                        </button>
+                        <button id="viewer-ssv-btn" type="button" title="Validate SSV workbook" data-ssv-open>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/><path d="M12 8v8M8 12h8"/></svg>
+                            SSV validation
+                        </button>
+                    </div>
+                </div>
+                <!-- Hidden file inputs -->
+                <input type="file" id="bdd-file-input" accept=".xlsx" style="display:none;">
+                <input type="file" id="neighbors-file-input" accept=".xlsx" style="display:none;">
+                <!-- BDD Legend Overlay -->
+                <div id="bdd-legend" class="bdd-legend" style="display:none;">
+                    <div class="bdd-legend-title">BDD Layers</div>
+                    <div class="bdd-legend-item"><span class="bdd-swatch" style="background:#ff9800;"></span>2G 900 MHz</div>
+                    <div class="bdd-legend-item"><span class="bdd-swatch" style="background:#ffeb3b;"></span>2G 1800 MHz</div>
+                    <div class="bdd-legend-item"><span class="bdd-swatch" style="background:#4caf50;"></span>3G 3011</div>
+                    <div class="bdd-legend-item"><span class="bdd-swatch" style="background:#00bcd4;"></span>3G 3032</div>
+                    <div class="bdd-legend-item"><span class="bdd-swatch" style="background:#2196f3;"></span>3G 10788</div>
+                    <div class="bdd-legend-item"><span class="bdd-swatch" style="background:#9c27b0;"></span>3G 10813</div>
+                    <div class="bdd-legend-item"><span class="bdd-swatch" style="background:#e91e63;"></span>3G 10838</div>
+                    <div class="bdd-legend-item" id="legend-neighbor-item" style="display:none;"><span class="bdd-swatch" style="background:#00ff88; border: 2px solid #fff;"></span>Neighbor Site</div>
                 </div>
                 <div id="map-info-hud" class="map-info-hud">
                     <div class="hud-row"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/><circle cx="12" cy="10" r="3"/></svg> <span id="hud-cgps">--</span></div>
@@ -103,11 +139,54 @@
         </div>
     </div>
 
+    <div id="ssv-validation-modal" class="ssv-modal" hidden>
+        <div class="ssv-modal-backdrop" data-ssv-close></div>
+        <div class="ssv-modal-panel glass-panel">
+            <div class="ssv-modal-glow ssv-modal-glow-one"></div>
+            <div class="ssv-modal-glow ssv-modal-glow-two"></div>
+            <div class="ssv-modal-header">
+                <div>
+                    <h2>SSV validation</h2>
+                </div>
+                <button type="button" class="ssv-close-btn" data-ssv-close aria-label="Close SSV validation">✕</button>
+            </div>
+
+            <div class="ssv-modal-body">
+                <div class="ssv-sticky-stack">
+                    <div id="ssv-upload-dropzone" class="ssv-upload-dropzone">
+                        <input type="file" id="ssv-upload-input" accept=".xlsx" hidden>
+                        <div class="ssv-upload-kicker">Start here</div>
+                        <div class="ssv-upload-title">Drop SSV workbook</div>
+                        <div id="ssv-upload-hint" class="ssv-upload-hint">Drop a single `.xlsx` SSV workbook here or click to choose one.</div>
+                    </div>
+
+                    <div class="ssv-progress-shell">
+                        <div class="ssv-progress-track">
+                            <div id="ssv-progress-bar" class="ssv-progress-bar"></div>
+                        </div>
+                        <div id="ssv-progress-label" class="ssv-progress-label">Select an .xlsx SSV workbook to begin.</div>
+                    </div>
+
+                    <div id="ssv-error" class="ssv-error" hidden></div>
+
+                    <div id="ssv-summary" class="ssv-results" hidden>
+                        <div class="ssv-summary-grid">
+                            <div id="ssv-verdict" class="ssv-verdict-card">Waiting for analysis</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="ssv-analysis-list" class="ssv-analysis-list" hidden></div>
+            </div>
+        </div>
+    </div>
+
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <!-- JSZip for Excel Parsing -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <!-- App Script -->
-    <script src="app.js?v=4"></script>
+    <script src="app.js?v=8"></script>
+    <script src="ssv-validation-ui.js?v=16"></script>
 </body>
 </html>

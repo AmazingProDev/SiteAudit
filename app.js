@@ -2,6 +2,7 @@
 const photoUpload = document.getElementById('photo-upload');
 const fileCount = document.getElementById('file-count');
 const generateBtn = document.getElementById('generate-btn');
+const setupSaBtn = document.getElementById('setup-sa-btn');
 const latInput = document.getElementById('lat-input');
 const lngInput = document.getElementById('lng-input');
 const setupScreen = document.getElementById('setup-screen');
@@ -76,6 +77,40 @@ photoUpload.addEventListener('change', async (e) => {
         generateBtn.disabled = true;
     }
 });
+
+if (setupSaBtn) {
+    setupSaBtn.addEventListener('click', () => {
+        photoUpload.value = '';
+        photoUpload.accept = '.xlsx';
+        photoUpload.click();
+    });
+}
+
+function openViewer() {
+    const rawLat = parseFloat(latInput.value);
+    const rawLng = parseFloat(lngInput.value);
+    
+    if (isNaN(rawLat) || isNaN(rawLng)) {
+        alert("Please enter valid numerical coordinate for Latitude and Longitude.");
+        return;
+    }
+    
+    if (photos.length === 0) {
+        alert("Please upload photos first.");
+        return;
+    }
+
+    siteLocation = [rawLat, rawLng];
+    
+    // Transition to viewer
+    setupScreen.classList.remove('active');
+    viewerScreen.classList.add('active');
+
+    // Give DOM time to apply active class and set flexbox dimensions
+    setTimeout(() => {
+        initViewer();
+    }, 100);
+}
 
 async function handleExcelUpload(file) {
     fileCount.textContent = `Analyzing Excel file for Panoramas and Sectors...`;
@@ -406,6 +441,7 @@ async function handleExcelUpload(file) {
         
         fileCount.textContent = `Successfully extracted ${photos.length} panoramas, Coordinates & Sectors!`;
         generateBtn.disabled = false;
+        openViewer();
         
     } catch (err) {
         console.error(err);
@@ -414,31 +450,7 @@ async function handleExcelUpload(file) {
     }
 }
 
-generateBtn.addEventListener('click', () => {
-    const rawLat = parseFloat(latInput.value);
-    const rawLng = parseFloat(lngInput.value);
-    
-    if (isNaN(rawLat) || isNaN(rawLng)) {
-        alert("Please enter valid numerical coordinate for Latitude and Longitude.");
-        return;
-    }
-    
-    if (photos.length === 0) {
-        alert("Please upload photos first.");
-        return;
-    }
-
-    siteLocation = [rawLat, rawLng];
-    
-    // Transition to viewer
-    setupScreen.classList.remove('active');
-    viewerScreen.classList.add('active');
-
-    // Give DOM time to apply active class and set flexbox dimensions
-    setTimeout(() => {
-        initViewer();
-    }, 100);
-});
+generateBtn.addEventListener('click', openViewer);
 
 restartBtn.addEventListener('click', () => {
     viewerScreen.classList.remove('active');
@@ -1035,3 +1047,642 @@ mapPanelDOM.addEventListener('touchmove', (e) => {
 }, {passive: false});
 
 mapPanelDOM.addEventListener('touchend', () => { isPanningMap = false; lastTouchX = null; lastTouchY = null; });
+
+// --- BDD & Neighbors Logic ---
+
+const addBddBtn = document.getElementById('add-bdd-btn');
+const bddFileInput = document.getElementById('bdd-file-input');
+const checkNeighborsBtn = document.getElementById('check-neighbors-btn');
+const neighborsFileInput = document.getElementById('neighbors-file-input');
+const bddLegend = document.getElementById('bdd-legend');
+const legendNeighborItem = document.getElementById('legend-neighbor-item');
+
+let bddData = {
+    cells2G: [],
+    cells3G: [],
+    sitesConfig: {} // siteName -> { lat, lng, sectors: { az: { layers2G: [], layers3G: [] } } }
+};
+let bddMapLayers = [];
+let bddSiteName = null;
+let neighborLines = [];
+let isBddLoaded = false;
+
+// BDD Add
+if (addBddBtn) {
+    addBddBtn.addEventListener('click', () => {
+        bddFileInput.click();
+    });
+}
+
+if (bddFileInput) {
+    bddFileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        addBddBtn.textContent = 'Loading...';
+        
+        try {
+            const zip = await JSZip.loadAsync(file);
+            const parser = new DOMParser();
+
+            // Need to parse Shared Strings first
+            let stringArray = [];
+            const sstXmlObj = zip.file('xl/sharedStrings.xml');
+            if (sstXmlObj) {
+                const sstText = await sstXmlObj.async('string');
+                const sstDoc = parser.parseFromString(sstText, "text/xml");
+                const siNodes = sstDoc.getElementsByTagName("si");
+                Array.from(siNodes).forEach((si) => {
+                    let fullText = "";
+                    const ts = si.getElementsByTagName("t");
+                    for(let t of ts) fullText += t.textContent;
+                    stringArray.push(fullText.trim());
+                });
+            }
+            
+            async function readSheetData(sheetPath) {
+                const sheetXmlObj = zip.file(sheetPath);
+                if (!sheetXmlObj) { console.warn('[BDD] Sheet not found:', sheetPath); return []; }
+                const sheetText = await sheetXmlObj.async('string');
+                console.log('[BDD] Sheet', sheetPath, 'XML length:', sheetText.length);
+                
+                // Use regex-based parsing instead of DOMParser to handle large (20MB+) sheets
+                let rowsData = [];
+                const rowRegex = /<row[^>]*>([\s\S]*?)<\/row>/g;
+                const cellRegex = /<c\s+r="([A-Z]+)\d+"(?:\s+[^>]*?)?\s*(?:t="([^"]*)")?[^>]*>(?:[\s\S]*?<v>([^<]*)<\/v>)?[\s\S]*?<\/c>/g;
+                // Also handle self-closing <c .../> and cells with attributes in different order
+                const cellRegex2 = /<c\s([^>]*)(?:\/>|>([\s\S]*?)<\/c>)/g;
+                
+                let rowMatch;
+                while ((rowMatch = rowRegex.exec(sheetText)) !== null) {
+                    let rowValues = [];
+                    const rowContent = rowMatch[1];
+                    
+                    cellRegex2.lastIndex = 0;
+                    let cellMatch;
+                    while ((cellMatch = cellRegex2.exec(rowContent)) !== null) {
+                        const attrs = cellMatch[1];
+                        const inner = cellMatch[2] || '';
+                        
+                        // Extract ref (column)
+                        const refMatch = attrs.match(/r="([^"]+)"/);
+                        if (!refMatch) continue;
+                        const colStr = refMatch[1].replace(/[0-9]/g, '');
+                        
+                        // Extract type
+                        const typeMatch = attrs.match(/t="([^"]+)"/);
+                        const cellType = typeMatch ? typeMatch[1] : '';
+                        
+                        // Extract value
+                        const vMatch = inner.match(/<v>([^<]*)<\/v>/);
+                        if (!vMatch) continue;
+                        
+                        let val = vMatch[1];
+                        if (cellType === 's') {
+                            val = stringArray[parseInt(val)] || val;
+                        }
+                        
+                        rowValues.push({ col: colStr, val: val });
+                    }
+                    
+                    if (rowValues.length > 0) {
+                        rowsData.push(rowValues);
+                    }
+                }
+                
+                console.log('[BDD] Parsed', rowsData.length, 'rows from', sheetPath);
+                return rowsData;
+            }
+
+            // Map sheet names to paths
+            const wbXmlObj = zip.file('xl/workbook.xml');
+            const wbText = await wbXmlObj.async('string');
+            const wbDoc = parser.parseFromString(wbText, "text/xml");
+            const sheets = wbDoc.getElementsByTagName("sheet");
+            let sheetMap = {};
+            const relsXmlObj = zip.file('xl/_rels/workbook.xml.rels');
+            const relsText = await relsXmlObj.async('string');
+            const relsDoc = parser.parseFromString(relsText, "text/xml");
+            
+            Array.from(sheets).forEach(s => {
+                const name = s.getAttribute("name");
+                const rId = s.getAttribute("r:id");
+                Array.from(relsDoc.getElementsByTagName("Relationship")).forEach(rel => {
+                    if (rel.getAttribute("Id") === rId) {
+                        sheetMap[name] = 'xl/' + rel.getAttribute("Target");
+                    }
+                });
+            });
+            
+            console.log('[BDD] Sheet Map:', JSON.stringify(sheetMap));
+
+            const sheet2GPath = sheetMap['2G'];
+            const sheet3GPath = sheetMap['3G'];
+            console.log('[BDD] 2G path:', sheet2GPath, '| 3G path:', sheet3GPath);
+
+            let data2G = sheet2GPath ? await readSheetData(sheet2GPath) : [];
+            let data3G = sheet3GPath ? await readSheetData(sheet3GPath) : [];
+            console.log('[BDD] 2G rows read:', data2G ? data2G.length : 'null', '| 3G rows read:', data3G ? data3G.length : 'null');
+            if (data2G && data2G.length > 0) console.log('[BDD] 2G first row:', JSON.stringify(data2G[0]));
+            if (data3G && data3G.length > 0) console.log('[BDD] 3G first row:', JSON.stringify(data3G[0]));
+
+            let sitesDict = {};
+            
+            function extractData(data, type) {
+                if (!data || data.length === 0) {
+                    console.warn('[BDD] No data for type:', type);
+                    return;
+                }
+                let headerFound = false;
+                let colMap = {};
+                let parsedCount = 0;
+                data.forEach(row => {
+                   if(!headerFound) {
+                       let isHeader = row.some(c => typeof c.val === 'string' && c.val.toLowerCase().includes('technologie'));
+                       if (isHeader) {
+                           row.forEach(c => colMap[c.val.toLowerCase().trim()] = c.col);
+                           headerFound = true;
+                           console.log('[BDD] Header found for', type, '- colMap:', JSON.stringify(colMap));
+                       }
+                   } else {
+                       let siteName = null, cellName = null, lat = null, lng = null, azimut = null, freq = null;
+                       
+                       row.forEach(c => {
+                           if (type === '2G') {
+                               if (c.col === colMap['btsname']) siteName = c.val;
+                               if (c.col === colMap['cellname']) cellName = c.val;
+                               if (c.col === colMap['bcch']) freq = parseFloat(c.val);
+                               if (c.col === colMap['latitude']) lat = parseFloat(c.val);
+                               if (c.col === colMap['longitude']) lng = parseFloat(c.val);
+                               if (c.col === colMap['azimut']) azimut = parseFloat(c.val);
+                           } else if (type === '3G') {
+                               if (c.col === colMap['nodebname']) siteName = c.val;
+                               if (c.col === colMap['cellname']) cellName = c.val;
+                               if (c.col === colMap['downlink uarfcn']) freq = parseFloat(c.val);
+                               if (c.col === colMap['latitude']) lat = parseFloat(c.val);
+                               if (c.col === colMap['longitude']) lng = parseFloat(c.val);
+                               if (c.col === colMap['azimut']) azimut = parseFloat(c.val);
+                           }
+                       });
+                       
+                       // Fallbacks
+                       if (!siteName && type === '2G') {
+                           row.forEach(c => {
+                               if(c.col === 'C') siteName = c.val;
+                               if(c.col === 'D') cellName = c.val;
+                               if(c.col === 'H') freq = parseFloat(c.val);
+                               if(c.col === 'K') lat = parseFloat(c.val);
+                               if(c.col === 'L') lng = parseFloat(c.val);
+                               if(c.col === 'M') azimut = parseFloat(c.val);
+                           });
+                       } else if (!siteName && type === '3G') {
+                           row.forEach(c => {
+                               if(c.col === 'D') siteName = c.val;
+                               if(c.col === 'E') cellName = c.val;
+                               if(c.col === 'J') freq = parseFloat(c.val);
+                               if(c.col === 'L') lat = parseFloat(c.val);
+                               if(c.col === 'M') lng = parseFloat(c.val);
+                               if(c.col === 'N') azimut = parseFloat(c.val);
+                           });
+                       }
+
+                       if (siteName && !isNaN(lat) && !isNaN(lng) && !isNaN(azimut) && freq !== null && !isNaN(freq)) {
+                           parsedCount++;
+                           let baseSiteName = siteName.replace(/^[234]G_/i, '').toUpperCase();
+                           if (!sitesDict[baseSiteName]) {
+                               sitesDict[baseSiteName] = { lat: Math.abs(lat), lng: -Math.abs(lng), cells: [], sectors: {} };
+                           }
+                           sitesDict[baseSiteName].cells.push({
+                               name: cellName,
+                               type: type,
+                               azimut: azimut,
+                               freq: freq
+                           });
+                           
+                           if (!sitesDict[baseSiteName].sectors[azimut]) {
+                               sitesDict[baseSiteName].sectors[azimut] = { layers2G: new Set(), layers3G: new Set() };
+                           }
+                           
+                           if (type === '2G') {
+                               let band = freq < 500 ? 900 : 1800;
+                               sitesDict[baseSiteName].sectors[azimut].layers2G.add(band);
+                           } else if (type === '3G') {
+                               sitesDict[baseSiteName].sectors[azimut].layers3G.add(freq);
+                           }
+                       }
+                   }
+                });
+                console.log('[BDD]', type, 'parsed', parsedCount, 'valid cells');
+            }
+
+            extractData(data2G, '2G');
+            extractData(data3G, '3G');
+
+            // Summary log
+            let sites2GOnly = 0, sites3GOnly = 0, sitesBoth = 0;
+            Object.keys(sitesDict).forEach(k => {
+                const s = sitesDict[k];
+                let has2G = false, has3G = false;
+                Object.values(s.sectors).forEach(sec => {
+                    if (sec.layers2G.size > 0) has2G = true;
+                    if (sec.layers3G.size > 0) has3G = true;
+                });
+                if (has2G && has3G) sitesBoth++;
+                else if (has2G) sites2GOnly++;
+                else if (has3G) sites3GOnly++;
+            });
+            console.log(`[BDD] Total sites: ${Object.keys(sitesDict).length} | 2G-only: ${sites2GOnly} | 3G-only: ${sites3GOnly} | Both: ${sitesBoth}`);
+
+            // Summary log before merge
+            let preMergeTotal = Object.keys(sitesDict).length;
+
+            // Proximity-based merging of 2G and 3G sites under 50m with same base name
+            function haversineDist(lat1, lon1, lat2, lon2) {
+                const R = 6371e3;
+                const p1 = lat1 * Math.PI/180;
+                const p2 = lat2 * Math.PI/180;
+                const dp = (lat2-lat1) * Math.PI/180;
+                const dl = (lon2-lon1) * Math.PI/180;
+                const a = Math.sin(dp/2) * Math.sin(dp/2) +
+                          Math.cos(p1) * Math.cos(p2) *
+                          Math.sin(dl/2) * Math.sin(dl/2);
+                const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                return R * c;
+            }
+
+            let baseGroups = {};
+            Object.keys(sitesDict).forEach(k => {
+                let base = k.replace(/_\d+$/, '');
+                if (!baseGroups[base]) baseGroups[base] = [];
+                baseGroups[base].push(k);
+            });
+
+            let newSitesDict = {};
+            let mergeCount = 0;
+
+            Object.keys(baseGroups).forEach(base => {
+                let members = baseGroups[base];
+                let processed = new Set();
+                let clusterIdx = 0;
+                
+                for (let i = 0; i < members.length; i++) {
+                    if (processed.has(i)) continue;
+                    
+                    let primaryKey = members[i];
+                    let primarySite = sitesDict[primaryKey];
+                    let clusterName = clusterIdx === 0 ? base : `${base}_${clusterIdx}`;
+                    
+                    // Always try to normalize to the base name if it's the first cluster of this base
+                    newSitesDict[clusterName] = primarySite;
+                    processed.add(i);
+                    
+                    for (let j = i + 1; j < members.length; j++) {
+                        if (processed.has(j)) continue;
+                        
+                        let otherKey = members[j];
+                        let otherSite = sitesDict[otherKey];
+                        
+                        let dist = haversineDist(primarySite.lat, primarySite.lng, otherSite.lat, otherSite.lng);
+                        if (dist < 50) {
+                            // Merge
+                            otherSite.cells.forEach(c => primarySite.cells.push(c));
+                            Object.keys(otherSite.sectors).forEach(azStr => {
+                                const az = parseFloat(azStr);
+                                if (!primarySite.sectors[az]) {
+                                    primarySite.sectors[az] = { layers2G: new Set(), layers3G: new Set() };
+                                }
+                                otherSite.sectors[az].layers2G.forEach(l => primarySite.sectors[az].layers2G.add(l));
+                                otherSite.sectors[az].layers3G.forEach(l => primarySite.sectors[az].layers3G.add(l));
+                            });
+                            
+                            processed.add(j);
+                            mergeCount++;
+                        }
+                    }
+                    clusterIdx++;
+                }
+            });
+            
+            sitesDict = newSitesDict;
+            console.log(`[BDD] Merged ${mergeCount} co-located sites under 50m. Total sites: ${preMergeTotal} -> ${Object.keys(sitesDict).length}`);
+
+            bddData.sitesConfig = sitesDict;
+            isBddLoaded = Object.keys(sitesDict).length > 0;
+
+            bddSiteName = null;
+            if (displaySiteName && displaySiteName.textContent) {
+                const shortName = displaySiteName.textContent.replace('NEIGHBORS ACCEPTANCE_', '').replace(' SA', '');
+                Object.keys(sitesDict).forEach(k => {
+                    if (k.toLowerCase().includes(shortName.toLowerCase())) bddSiteName = k;
+                });
+            }
+            
+            plotBDDSites();
+
+            addBddBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg> BDD Loaded`;
+            addBddBtn.classList.add('loaded');
+            bddLegend.style.display = 'block';
+
+        } catch (err) {
+            console.error(err);
+            alert("Error loading BDD: " + err.message);
+            addBddBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg> Add BDD`;
+        }
+    });
+}
+
+function getLayerColor(type, val) {
+    if (type === '2G') {
+        return val === 900 ? '#ff9800' : '#ffeb3b';
+    } else {
+        if (val === 3011) return '#4caf50';
+        if (val === 3032) return '#00bcd4';
+        if (val === 10788) return '#2196f3';
+        if (val === 10813) return '#9c27b0';
+        if (val === 10838) return '#e91e63';
+        return '#aaaaaa';
+    }
+}
+
+// Global state for neighbors
+window.polygonsByCellName = {};
+window.neighborPairs = [];
+window.isNeighborsLoaded = false;
+
+// Helper to get siteKey and azimut for a specific cell
+window.getCellSiteAndAzimuth = function(cellNameRaw) {
+    if (!bddData.sitesConfig) return null;
+    const sName = cellNameRaw.substring(0, cellNameRaw.length - 1);
+    const baseSName = sName.replace(/^[234]G_/i, '').replace(/_\d+$/, '');
+    const baseKey = Object.keys(bddData.sitesConfig).find(k => k.toLowerCase() === baseSName.toLowerCase() || k.toLowerCase().includes(baseSName.toLowerCase()));
+    if (!baseKey) return null;
+    
+    const site = bddData.sitesConfig[baseKey];
+    const cell = site.cells.find(c => c.name.toLowerCase() === cellNameRaw.toLowerCase());
+    if (!cell) return null;
+
+    return { siteKey: baseKey, azimut: cell.azimut };
+};
+
+function plotBDDSites() {
+    if (!map || !isBddLoaded) return;
+    
+    // Clear old BDD layers
+    bddMapLayers.forEach(l => map.removeLayer(l));
+    bddMapLayers = [];
+    
+    const maxRadius = 150; 
+    const fov = 60;
+    
+    // Ordered frequencies 
+    const freqOrder = [
+        {type: '2G', val: 900},
+        {type: '2G', val: 1800},
+        {type: '3G', val: 3011},
+        {type: '3G', val: 3032},
+        {type: '3G', val: 10788},
+        {type: '3G', val: 10813},
+        {type: '3G', val: 10838}
+    ];
+
+    Object.keys(bddData.sitesConfig).forEach(siteName => {
+        const site = bddData.sitesConfig[siteName];
+        
+        // Add tiny marker for site center
+        const marker = L.circleMarker([site.lat, site.lng], {
+            radius: 3,
+            color: '#ffffff',
+            weight: 1,
+            fillColor: '#000000',
+            fillOpacity: 1
+        }).bindTooltip(siteName, { direction: 'top', className: 'site-tooltip' }).addTo(map);
+        marker.siteName = siteName;
+        bddMapLayers.push(marker);
+        
+        // Draw sectors
+        Object.keys(site.sectors).forEach(azStr => {
+            const az = parseFloat(azStr);
+            const sec = site.sectors[az];
+            
+            let activeLayers = [];
+            freqOrder.forEach(fo => {
+                if (fo.type === '2G' && sec.layers2G.has(fo.val)) activeLayers.push(fo);
+                if (fo.type === '3G' && sec.layers3G.has(fo.val)) activeLayers.push(fo);
+            });
+            
+            if (activeLayers.length === 0) return;
+            
+            const numSlices = activeLayers.length;
+            // Equal sizing: every slice gets the same radius thickness
+            let cumulativeRadius = 0;
+            
+            for (let i = 0; i < numSlices; i++) {
+                const layer = activeLayers[i];
+                const sliceThickness = maxRadius / numSlices;
+                const innerRadius = cumulativeRadius;
+                cumulativeRadius += sliceThickness;
+                const outerRadius = cumulativeRadius;
+                
+                const leftA = az - fov/2;
+                const rightA = az + fov/2;
+                
+                let points = [];
+                // Outer arc
+                for(let a=leftA; a<=rightA; a += 5) {
+                    points.push(destinationPoint(site.lat, site.lng, a, outerRadius));
+                }
+                points.push(destinationPoint(site.lat, site.lng, rightA, outerRadius));
+                
+                // Inner arc (backwards)
+                for(let a=rightA; a>=leftA; a -= 5) {
+                    points.push(destinationPoint(site.lat, site.lng, a, innerRadius));
+                }
+                points.push(destinationPoint(site.lat, site.lng, leftA, innerRadius));
+                
+                const color = getLayerColor(layer.type, layer.val);
+                
+                const poly = L.polygon(points, {
+                    color: color,
+                    fillColor: color,
+                    fillOpacity: 0.8,
+                    weight: 1,
+                    interactive: true
+                }).bindTooltip(`${siteName}<br>Azimuth: ${az}°<br>${layer.type} ${layer.val}`, { className: 'sector-tooltip' }).addTo(map);
+                
+                // Find precise corresponding cell
+                let sliceCell = site.cells.find(c => c.azimut === az && c.type === layer.type && (layer.type === '2G' ? (c.freq < 500 ? 900 : 1800) === layer.val : c.freq === layer.val));
+                
+                poly.siteName = siteName;
+                poly.azimut = az;
+                poly.originalColor = color;
+                poly.isSector = true;
+                bddMapLayers.push(poly);
+                
+                if (sliceCell) {
+                    poly.cellName = sliceCell.name;
+                    window.polygonsByCellName[sliceCell.name.toLowerCase()] = poly;
+                    
+                    poly.on('click', function(e) {
+                        if (!window.isNeighborsLoaded || !window.neighborPairs) return;
+                        
+                        // Clear old highlights and reset to original colors
+                        bddMapLayers.forEach(l => {
+                            if (l.isSector) {
+                                l.setStyle({ weight: 1, color: l.originalColor, fillColor: l.originalColor, fillOpacity: 0.8 });
+                            }
+                        });
+                        
+                        let myCellName = poly.cellName.toLowerCase();
+                        let targetIdentifiers = new Set();
+                        
+                        // Find targets for this source cell
+                        window.neighborPairs.forEach(pair => {
+                            if (pair.src.toLowerCase() === myCellName) {
+                                const tgtInfo = window.getCellSiteAndAzimuth(pair.tgt);
+                                if (tgtInfo) {
+                                    if (!(tgtInfo.siteKey === poly.siteName && tgtInfo.azimut === poly.azimut)) {
+                                        targetIdentifiers.add(tgtInfo.siteKey + '_' + tgtInfo.azimut);
+                                    }
+                                }
+                            }
+                        });
+                        
+                        if (targetIdentifiers.size === 0) return;
+                        
+                        // Color all layers related to the target sectors RED
+                        bddMapLayers.forEach(l => {
+                            if (l.isSector && targetIdentifiers.has(l.siteName + '_' + l.azimut)) {
+                                l.setStyle({ weight: 2, color: '#ff0000', fillColor: '#ff0000', fillOpacity: 1 });
+                            }
+                        });
+                        
+                        // Color the specific clicked SA layer RED as well
+                        poly.setStyle({ weight: 2, color: '#ff0000', fillColor: '#ff0000', fillOpacity: 1 });
+                        
+                        L.DomEvent.stopPropagation(e);
+                    });
+                }
+            }
+        });
+    });
+}
+
+// Neighbors File Check
+if (checkNeighborsBtn) {
+    checkNeighborsBtn.addEventListener('click', () => {
+        if (!isBddLoaded) {
+            alert("Please load BDD first so neighbor coordinates can be resolved.");
+            return;
+        }
+        neighborsFileInput.click();
+    });
+}
+
+if (neighborsFileInput) {
+    neighborsFileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        checkNeighborsBtn.textContent = 'Loading...';
+        
+        try {
+            const zip = await JSZip.loadAsync(file);
+            const parser = new DOMParser();
+
+            let stringArray = [];
+            const sstXmlObj = zip.file('xl/sharedStrings.xml');
+            if (sstXmlObj) {
+                const sstText = await sstXmlObj.async('string');
+                const sstDoc = parser.parseFromString(sstText, "text/xml");
+                const siNodes = sstDoc.getElementsByTagName("si");
+                Array.from(siNodes).forEach((si) => {
+                    let fullText = "";
+                    const ts = si.getElementsByTagName("t");
+                    for(let t of ts) fullText += t.textContent;
+                    stringArray.push(fullText.trim());
+                });
+            }
+
+            const sheetXmlObj = zip.file('xl/worksheets/sheet1.xml');
+            if (!sheetXmlObj) throw new Error("Could not find sheet1.xml");
+            const sheetText = await sheetXmlObj.async('string');
+            const sheetDoc = parser.parseFromString(sheetText, "text/xml");
+            
+            let neighborSites = new Set();
+            let neighborPairs = [];
+            
+            const rows = sheetDoc.getElementsByTagName("row");
+            let isHeader = true;
+            let GSM_SRC = null, GSM_TGT = null, DCS_SRC = null, DCS_TGT = null;
+
+            Array.from(rows).forEach(row => {
+                let rowVals = {};
+                const cells = row.getElementsByTagName("c");
+                Array.from(cells).forEach(c => {
+                    const cRef = c.getAttribute("r");
+                    const colStr = cRef.replace(/[0-9]/g, '');
+                    const v = c.getElementsByTagName("v")[0];
+                    if (v) {
+                        let val = v.textContent;
+                        let isStr = c.getAttribute("t") === "s" || c.getAttribute("t") === "inlineStr";
+                        if (isStr && c.getAttribute("t") === "s") val = stringArray[parseInt(val)];
+                        rowVals[colStr] = val.trim();
+                    }
+                });
+                
+                if (isHeader && Object.keys(rowVals).length > 0) {
+                    // Try to map column headers
+                    for (let col in rowVals) {
+                        let h = rowVals[col].toLowerCase();
+                        if (h.includes('source gsm')) GSM_SRC = col;
+                        else if (h.includes('target') && GSM_SRC && !GSM_TGT) GSM_TGT = col;
+                        else if (h.includes('source dcs')) DCS_SRC = col;
+                        else if (h.includes('target') && DCS_SRC && !DCS_TGT) DCS_TGT = col;
+                    }
+                    isHeader = false;
+                    return;
+                }
+
+                if (!isHeader) {
+                    // Collect valid pairs
+                    if (GSM_SRC && GSM_TGT && rowVals[GSM_SRC] && rowVals[GSM_TGT]) {
+                        neighborPairs.push({ src: rowVals[GSM_SRC].trim(), tgt: rowVals[GSM_TGT].trim() });
+                    }
+                    if (DCS_SRC && DCS_TGT && rowVals[DCS_SRC] && rowVals[DCS_TGT]) {
+                        neighborPairs.push({ src: rowVals[DCS_SRC].trim(), tgt: rowVals[DCS_TGT].trim() });
+                    }
+                }
+            });
+
+            window.neighborPairs = neighborPairs;
+            window.isNeighborsLoaded = true;
+
+            // Clear any existing lines
+            neighborLines.forEach(l => map.removeLayer(l));
+            neighborLines = [];
+            bddMapLayers.forEach(l => {
+                if (l.isSector) {
+                    l.setStyle({ weight: 1, color: l.options.fillColor, fillOpacity: 0.8 });
+                }
+            });
+
+            checkNeighborsBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg> Loaded (Click Sector)`;
+            checkNeighborsBtn.classList.add('loaded');
+            legendNeighborItem.style.display = 'flex';
+            
+            // Add a map click listener to clear colors when clicking empty space
+            map.on('click', function() {
+                bddMapLayers.forEach(l => {
+                    if (l.isSector) {
+                        l.setStyle({ weight: 1, color: l.originalColor, fillColor: l.originalColor, fillOpacity: 0.8 });
+                    }
+                });
+            });
+
+        } catch (err) {
+            console.error(err);
+            alert("Error loading Neighbors: " + err.message);
+            checkNeighborsBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg> Neighbors`;
+        }
+    });
+}

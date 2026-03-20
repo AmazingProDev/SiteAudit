@@ -7,3 +7,4 @@ test_images/
 # Ignore editor directories
 .idea/
 .vscode/
+__pycache__/
