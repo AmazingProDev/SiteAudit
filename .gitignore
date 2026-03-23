@@ -9,3 +9,9 @@ test_images/
 .vscode/
 __pycache__/
 .venv/
+.vercel
+node_modules/
+.cache/
+.tmp*/
+0
+1

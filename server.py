@@ -1,67 +1,18 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
+import json
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from ssv_validation.service import SsvValidationError, validate_ssv_workbook
+from ssv_validation.http_api import handle_ssv_validation_request
 
 LOGGER = logging.getLogger(__name__)
 APP_ROOT = Path(__file__).resolve().parent
-
-
-def parse_multipart_form_data(content_type: str, body: bytes) -> dict[str, list[dict[str, Any]]]:
-    boundary_match = re.search(r'boundary="?([^";]+)"?', content_type)
-    if not boundary_match:
-        raise ValueError("Missing multipart boundary.")
-
-    boundary = boundary_match.group(1).encode("utf-8")
-    delimiter = b"--" + boundary
-    fields: dict[str, list[dict[str, Any]]] = {}
-
-    for chunk in body.split(delimiter):
-        part = chunk.strip()
-        if not part or part == b"--":
-            continue
-
-        if part.startswith(b"--"):
-            part = part[2:]
-
-        header_blob, separator, content = part.partition(b"\r\n\r\n")
-        if not separator:
-            continue
-
-        headers = {}
-        for line in header_blob.decode("utf-8", "ignore").split("\r\n"):
-            if ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            headers[key.strip().lower()] = value.strip()
-
-        disposition = headers.get("content-disposition", "")
-        name_match = re.search(r'name="([^"]+)"', disposition)
-        filename_match = re.search(r'filename="([^"]*)"', disposition)
-        if not name_match:
-            continue
-
-        name = name_match.group(1)
-        payload = content[:-2] if content.endswith(b"\r\n") else content
-        fields.setdefault(name, []).append(
-            {
-                "filename": filename_match.group(1) if filename_match else None,
-                "content_type": headers.get("content-type", "application/octet-stream"),
-                "data": payload,
-            }
-        )
-
-    return fields
-
-
 class AppRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(APP_ROOT), **kwargs)
@@ -76,8 +27,19 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.end_headers()
 
+    def do_GET(self) -> None:
+        parsed_path = urlsplit(self.path)
+        if parsed_path.path == "/favicon.ico":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.end_headers()
+            return
+
+        self.path = parsed_path.path
+        super().do_GET()
+
     def do_POST(self) -> None:
-        if self.path != "/api/ssv-validation":
+        parsed_path = urlsplit(self.path)
+        if parsed_path.path not in {"/api/ssv-validation", "/api/ssv_validation"}:
             self.send_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "Unknown API route."})
             return
 
@@ -91,56 +53,13 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": "No upload payload was received."})
             return
 
-        content_type = self.headers.get("Content-Type", "")
-        if "multipart/form-data" not in content_type:
-            self.send_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": "The upload must use multipart/form-data."})
-            return
-
         body = self.rfile.read(content_length)
-
-        try:
-            fields = parse_multipart_form_data(content_type, body)
-        except ValueError as exc:
-            self.send_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)})
-            return
-
-        uploaded_file = None
-        for field_parts in fields.values():
-            for part in field_parts:
-                if part.get("filename"):
-                    uploaded_file = part
-                    break
-            if uploaded_file:
-                break
-
-        if not uploaded_file:
-            self.send_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": "No Excel file was uploaded."})
-            return
-
-        filename = uploaded_file.get("filename") or "upload.xlsx"
-        if not filename.lower().endswith(".xlsx"):
-            self.send_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": "Invalid file format. Please upload an .xlsx workbook."})
-            return
-
-        include_all_previews = False
-        include_preview_parts = fields.get("includeAllPreviews", [])
-        if include_preview_parts:
-            include_all_previews = (
-                include_preview_parts[0].get("data", b"").decode("utf-8", "ignore").strip().lower() in {"1", "true", "yes", "on"}
-            )
-
-        try:
-            response = validate_ssv_workbook(uploaded_file["data"], filename, include_all_previews=include_all_previews)
-        except SsvValidationError as exc:
-            LOGGER.warning("SSV validation failed: %s", exc)
-            self.send_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)})
-            return
-        except Exception as exc:  # pragma: no cover - API safeguard
-            LOGGER.exception("Unexpected SSV validation error")
-            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"success": False, "error": f"Unexpected server error: {exc}"})
-            return
-
-        self.send_json(HTTPStatus.OK, response)
+        status, response = handle_ssv_validation_request(self.headers, body)
+        if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
+            LOGGER.exception("Unexpected SSV validation error: %s", response.get("error"))
+        elif status >= HTTPStatus.BAD_REQUEST:
+            LOGGER.warning("SSV validation failed: %s", response.get("error"))
+        self.send_json(status, response)
 
     def send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload).encode("utf-8")

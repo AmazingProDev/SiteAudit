@@ -36,7 +36,7 @@
         if (window.location.protocol === 'file:') {
             return 'http://127.0.0.1:8000/api/ssv-validation';
         }
-        return '/api/ssv-validation';
+        return '/api/ssv_validation';
     }
 
     function promptForWorkbook() {
@@ -567,7 +567,7 @@
         };
 
         xhr.onerror = function () {
-            showError('Unable to reach the SSV validation API. Start the local server with `python3 server.py` and try again.');
+            showError('Unable to reach the SSV validation API. For local use, start the server with `.venv/bin/python server.py` and try again.');
             setProgress(0, 'Connection failed.');
         };
 

@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv
+.cache
+.tmp*
+node_modules
+test_images
+tests
+SA_Neighbors
+__pycache__
+scripts
+0
+1
