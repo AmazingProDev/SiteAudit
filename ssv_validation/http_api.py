@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
+import urllib.request
 from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any
+from urllib.parse import urlparse
 
 from ssv_validation.service import SsvValidationError, validate_ssv_workbook
 
@@ -55,11 +58,68 @@ def parse_multipart_form_data(content_type: str, body: bytes) -> dict[str, list[
     return fields
 
 
+def is_allowed_blob_url(blob_url: str) -> bool:
+    try:
+        parsed = urlparse(blob_url)
+    except Exception:
+        return False
+
+    if parsed.scheme != "https" or not parsed.netloc:
+        return False
+
+    hostname = parsed.hostname or ""
+    return hostname.endswith(".blob.vercel-storage.com") or hostname.endswith(".public.blob.vercel-storage.com")
+
+
+def handle_ssv_validation_blob_json(payload: Mapping[str, Any]) -> tuple[HTTPStatus, dict[str, Any]]:
+    blob_url = str(payload.get("blobUrl") or "").strip()
+    filename = str(payload.get("filename") or "upload.xlsx").strip() or "upload.xlsx"
+    include_all_previews = bool(payload.get("includeAllPreviews"))
+
+    if not blob_url:
+        return HTTPStatus.BAD_REQUEST, {"success": False, "error": "Missing blob URL."}
+
+    if not is_allowed_blob_url(blob_url):
+        return HTTPStatus.BAD_REQUEST, {"success": False, "error": "Invalid blob URL."}
+
+    if not filename.lower().endswith(".xlsx"):
+        return HTTPStatus.BAD_REQUEST, {
+            "success": False,
+            "error": "Invalid file format. Please upload an .xlsx workbook.",
+        }
+
+    try:
+        with urllib.request.urlopen(blob_url) as response:
+            file_bytes = response.read()
+    except Exception as exc:
+        return HTTPStatus.BAD_REQUEST, {"success": False, "error": f"Unable to download workbook from Blob: {exc}"}
+
+    try:
+        response = validate_ssv_workbook(file_bytes, filename, include_all_previews=include_all_previews)
+    except SsvValidationError as exc:
+        return HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)}
+    except Exception as exc:  # pragma: no cover - API safeguard
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {"success": False, "error": f"Unexpected server error: {exc}"}
+
+    return HTTPStatus.OK, response
+
+
 def handle_ssv_validation_request(headers: Mapping[str, str], body: bytes) -> tuple[HTTPStatus, dict[str, Any]]:
     try:
         content_type = headers.get("Content-Type") or headers.get("content-type") or ""
     except Exception:
         content_type = ""
+
+    if "application/json" in content_type:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            return HTTPStatus.BAD_REQUEST, {"success": False, "error": "Invalid JSON payload."}
+
+        if not isinstance(payload, dict):
+            return HTTPStatus.BAD_REQUEST, {"success": False, "error": "Invalid JSON payload."}
+
+        return handle_ssv_validation_blob_json(payload)
 
     if "multipart/form-data" not in content_type:
         return HTTPStatus.BAD_REQUEST, {

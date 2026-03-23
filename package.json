@@ -1,0 +1,7 @@
+{
+  "name": "site-audit-360-view",
+  "private": true,
+  "dependencies": {
+    "@vercel/blob": "^1.1.1"
+  }
+}

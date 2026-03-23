@@ -30,6 +30,7 @@
     let showAllAnalyses = false;
     let latestIncludesAllPreviews = false;
     let latestWorkbookFile = null;
+    let latestBlobUpload = null;
     let pendingShowAllAfterReload = false;
 
     function getApiUrl() {
@@ -37,6 +38,41 @@
             return 'http://127.0.0.1:8000/api/ssv-validation';
         }
         return '/api/ssv_validation';
+    }
+
+    function isLocalSsvApi() {
+        if (window.location.protocol === 'file:') {
+            return true;
+        }
+
+        const hostname = window.location.hostname || '';
+        return hostname === '127.0.0.1' || hostname === 'localhost';
+    }
+
+    function getBlobUploadApiUrl() {
+        if (isLocalSsvApi()) {
+            return null;
+        }
+        return '/api/blob-upload';
+    }
+
+    async function uploadWorkbookToBlob(file) {
+        const { upload } = await import('https://esm.sh/@vercel/blob/client');
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]+/g, '-');
+        return upload(`ssv-workbooks/${Date.now()}-${safeName}`, file, {
+            access: 'public',
+            handleUploadUrl: getBlobUploadApiUrl(),
+            clientPayload: JSON.stringify({ filename: file.name, purpose: 'ssv-validation' }),
+        });
+    }
+
+    function sendBlobValidationRequest(xhr, blobUrl, fileName, includeAllPreviews) {
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.send(JSON.stringify({
+            filename: fileName,
+            blobUrl: blobUrl,
+            includeAllPreviews: Boolean(includeAllPreviews),
+        }));
     }
 
     function promptForWorkbook() {
@@ -69,6 +105,7 @@
         showAllAnalyses = false;
         latestIncludesAllPreviews = false;
         latestWorkbookFile = null;
+        latestBlobUpload = null;
         pendingShowAllAfterReload = false;
         setProgress(0, 'Select an .xlsx SSV workbook to begin.');
         hideError();
@@ -491,10 +528,18 @@
 
     if (toggleAnalysesButton) {
         toggleAnalysesButton.addEventListener('click', function () {
-            if (!showAllAnalyses && !latestIncludesAllPreviews && latestWorkbookFile) {
+            if (!showAllAnalyses && !latestIncludesAllPreviews && (latestWorkbookFile || latestBlobUpload)) {
                 pendingShowAllAfterReload = true;
                 toggleAnalysesButton.textContent = 'Loading all analysis...';
-                handleUpload(latestWorkbookFile, { includeAllPreviews: true, preserveSelection: true });
+                if (!isLocalSsvApi() && latestBlobUpload) {
+                    handleUpload(latestWorkbookFile || { name: latestBlobUpload.filename, size: 0 }, {
+                        includeAllPreviews: true,
+                        preserveSelection: true,
+                        reuseBlobUpload: true,
+                    });
+                } else {
+                    handleUpload(latestWorkbookFile, { includeAllPreviews: true, preserveSelection: true });
+                }
                 return;
             }
             showAllAnalyses = !showAllAnalyses;
@@ -517,36 +562,22 @@
             summaryShell.hidden = true;
         }
         analysisList.hidden = true;
-        latestWorkbookFile = file;
+        if (file instanceof File) {
+            latestWorkbookFile = file;
+        }
         uploadHint.textContent = `Selected workbook: ${file.name}`;
         setProgress(8, 'Uploading workbook...');
-
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('debug', '1');
-        formData.append('includeAllPreviews', uploadOptions.includeAllPreviews ? '1' : '0');
 
         const xhr = new XMLHttpRequest();
         xhr.open('POST', getApiUrl(), true);
 
-        xhr.upload.onprogress = function (event) {
-            if (!event.lengthComputable) return;
-            const ratio = event.loaded / event.total;
-            setProgress(10 + (ratio * 55), `Uploading workbook... ${Math.round(ratio * 100)}%`);
-        };
-
-        xhr.onloadstart = function () {
-            setProgress(10, 'Uploading workbook...');
-        };
-
-        xhr.onreadystatechange = function () {
-            if (xhr.readyState === XMLHttpRequest.HEADERS_RECEIVED) {
-                setProgress(78, 'Workbook received. Extracting SSV map images...');
-            }
-        };
-
         xhr.onload = function () {
             let payload;
+            if (xhr.status === 413) {
+                showError('This workbook is too large for the deployed API request limit.');
+                setProgress(0, 'Upload rejected by deployment limit.');
+                return;
+            }
             try {
                 payload = JSON.parse(xhr.responseText || '{}');
             } catch (error) {
@@ -571,12 +602,64 @@
             setProgress(0, 'Connection failed.');
         };
 
-        xhr.send(formData);
-        setTimeout(() => {
-            if (xhr.readyState !== XMLHttpRequest.DONE) {
-                setProgress(86, 'Analyzing extracted maps and computing validation metrics...');
+        if (isLocalSsvApi()) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('debug', '1');
+            formData.append('includeAllPreviews', uploadOptions.includeAllPreviews ? '1' : '0');
+
+            xhr.upload.onprogress = function (event) {
+                if (!event.lengthComputable) return;
+                const ratio = event.loaded / event.total;
+                setProgress(10 + (ratio * 55), `Uploading workbook... ${Math.round(ratio * 100)}%`);
+            };
+
+            xhr.onloadstart = function () {
+                setProgress(10, 'Uploading workbook...');
+            };
+
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === XMLHttpRequest.HEADERS_RECEIVED) {
+                    setProgress(78, 'Workbook received. Extracting SSV map images...');
+                }
+            };
+
+            xhr.send(formData);
+            setTimeout(() => {
+                if (xhr.readyState !== XMLHttpRequest.DONE) {
+                    setProgress(86, 'Analyzing extracted maps and computing validation metrics...');
+                }
+            }, 450);
+            return;
+        }
+
+        (async function () {
+            try {
+                if (uploadOptions.reuseBlobUpload && latestBlobUpload) {
+                    setProgress(72, 'Workbook already stored. Starting SSV analysis...');
+                    sendBlobValidationRequest(xhr, latestBlobUpload.blobUrl, latestBlobUpload.filename, uploadOptions.includeAllPreviews);
+                } else {
+                    setProgress(10, 'Uploading workbook to Vercel Blob...');
+                    const blob = await uploadWorkbookToBlob(file);
+                    latestBlobUpload = {
+                        filename: file.name,
+                        blobUrl: blob.url,
+                    };
+                    setProgress(72, 'Workbook stored. Starting SSV analysis...');
+                    sendBlobValidationRequest(xhr, blob.url, file.name, uploadOptions.includeAllPreviews);
+                }
+
+                setTimeout(() => {
+                    if (xhr.readyState !== XMLHttpRequest.DONE) {
+                        setProgress(86, 'Analyzing extracted maps and computing validation metrics...');
+                    }
+                }, 450);
+            } catch (error) {
+                const message = error && error.message ? error.message : 'Unable to upload workbook to Vercel Blob.';
+                showError(message);
+                setProgress(0, 'Upload failed.');
             }
-        }, 450);
+        })();
     }
 
     openButtons.forEach((button) => button.addEventListener('click', promptForWorkbook));
