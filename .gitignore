@@ -8,3 +8,4 @@ test_images/
 .idea/
 .vscode/
 __pycache__/
+.venv/
