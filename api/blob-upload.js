@@ -1,18 +1,49 @@
-import { handleUpload } from '@vercel/blob/client';
+const { handleUpload } = require('@vercel/blob/client');
 
-export async function POST(request) {
-  let body;
+function sendJson(res, status, payload) {
+  res.statusCode = status;
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.end(JSON.stringify(payload));
+}
 
-  try {
-    body = await request.json();
-  } catch (error) {
-    return Response.json({ error: 'Invalid upload payload.' }, { status: 400 });
+module.exports = async function handler(req, res) {
+  if (req.method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.end();
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: 'Method not allowed.' });
+    return;
+  }
+
+  let body = req.body;
+
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch (error) {
+      sendJson(res, 400, { error: 'Invalid upload payload.' });
+      return;
+    }
+  }
+
+  if (!body || typeof body !== 'object') {
+    sendJson(res, 400, { error: 'Invalid upload payload.' });
+    return;
   }
 
   try {
     const jsonResponse = await handleUpload({
       body,
-      request,
+      request: req,
       onBeforeGenerateToken: async (pathname) => {
         const safePathname = String(pathname || 'upload.xlsx').replace(/[^a-zA-Z0-9._/-]+/g, '-');
         return {
@@ -28,22 +59,12 @@ export async function POST(request) {
       onUploadCompleted: async () => {},
     });
 
-    return Response.json(jsonResponse);
+    sendJson(res, 200, jsonResponse);
   } catch (error) {
-    return Response.json(
-      { error: error instanceof Error ? error.message : 'Blob upload failed.' },
-      { status: 400 },
-    );
+    const message =
+      error && typeof error.message === 'string'
+        ? error.message
+        : 'Blob upload failed.';
+    sendJson(res, 500, { error: message });
   }
-}
-
-export async function OPTIONS() {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    },
-  });
-}
+};
