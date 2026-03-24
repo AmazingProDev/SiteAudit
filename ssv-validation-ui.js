@@ -37,7 +37,7 @@
         if (window.location.protocol === 'file:') {
             return 'http://127.0.0.1:8000/api/ssv-validation';
         }
-        return '/api/ssv_validation';
+        return '/api';
     }
 
     function isLocalSsvApi() {

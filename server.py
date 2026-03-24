@@ -39,7 +39,7 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed_path = urlsplit(self.path)
-        if parsed_path.path not in {"/api/ssv-validation", "/api/ssv_validation"}:
+        if parsed_path.path not in {"/api", "/api/ssv-validation", "/api/ssv_validation"}:
             self.send_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "Unknown API route."})
             return
 
