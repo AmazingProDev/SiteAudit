@@ -32,6 +32,8 @@
     let latestWorkbookFile = null;
     let latestBlobUpload = null;
     let pendingShowAllAfterReload = false;
+    const BLOB_UPLOAD_IDLE_TIMEOUT_MS = 45000;
+    const BLOB_UPLOAD_MAX_TIMEOUT_MS = 300000;
 
     function getApiUrl() {
         if (window.location.protocol === 'file:') {
@@ -56,14 +58,38 @@
         return '/api/blob-upload';
     }
 
-    async function uploadWorkbookToBlob(file) {
+    async function uploadWorkbookToBlob(file, onProgress) {
         const { upload } = await import('https://esm.sh/@vercel/blob/client');
         const safeName = file.name.replace(/[^a-zA-Z0-9._-]+/g, '-');
-        return upload(`ssv-workbooks/${Date.now()}-${safeName}`, file, {
-            access: 'public',
-            handleUploadUrl: getBlobUploadApiUrl(),
-            clientPayload: JSON.stringify({ filename: file.name, purpose: 'ssv-validation' }),
-        });
+        const controller = new AbortController();
+        let lastProgressAt = Date.now();
+        const maxTimer = window.setTimeout(() => {
+            controller.abort(new Error('Upload timed out before Vercel Blob finished receiving the workbook.'));
+        }, BLOB_UPLOAD_MAX_TIMEOUT_MS);
+        const idleTimer = window.setInterval(() => {
+            if (Date.now() - lastProgressAt > BLOB_UPLOAD_IDLE_TIMEOUT_MS) {
+                controller.abort(new Error('Upload stalled while sending the workbook to Vercel Blob.'));
+            }
+        }, 5000);
+
+        try {
+            return await upload(`ssv-workbooks/${Date.now()}-${safeName}`, file, {
+                access: 'public',
+                multipart: true,
+                handleUploadUrl: getBlobUploadApiUrl(),
+                clientPayload: JSON.stringify({ filename: file.name, purpose: 'ssv-validation' }),
+                abortSignal: controller.signal,
+                onUploadProgress(progressEvent) {
+                    lastProgressAt = Date.now();
+                    if (typeof onProgress === 'function') {
+                        onProgress(progressEvent);
+                    }
+                },
+            });
+        } finally {
+            window.clearTimeout(maxTimer);
+            window.clearInterval(idleTimer);
+        }
     }
 
     function sendBlobValidationRequest(xhr, blobUrl, fileName, includeAllPreviews) {
@@ -640,7 +666,13 @@
                     sendBlobValidationRequest(xhr, latestBlobUpload.blobUrl, latestBlobUpload.filename, uploadOptions.includeAllPreviews);
                 } else {
                     setProgress(10, 'Uploading workbook to Vercel Blob...');
-                    const blob = await uploadWorkbookToBlob(file);
+                    const blob = await uploadWorkbookToBlob(file, (progressEvent) => {
+                        const percentage = Math.max(0, Math.min(100, Number(progressEvent && progressEvent.percentage) || 0));
+                        setProgress(
+                            10 + (percentage * 0.55),
+                            `Uploading workbook to Vercel Blob... ${Math.round(percentage)}%`,
+                        );
+                    });
                     latestBlobUpload = {
                         filename: file.name,
                         blobUrl: blob.url,
