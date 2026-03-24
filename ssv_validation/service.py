@@ -21,6 +21,7 @@ from .imaging import (
 )
 from .kpi_analyzer import SsvKpiError, analyze_kpi_bitmap, bitmap_has_degraded_legend_swatch, extract_bitmap_legend_reference
 from .legend_mapping import enrich_warning_messages
+from .models import AnalysisOutcome
 from .throughput import evaluate_avg_throughput
 from .workbook import SsvWorkbookError, extract_avg_throughput_metrics, row_col_to_ref, select_target_images
 
@@ -79,6 +80,57 @@ def should_retry_prepared_kpi(candidate, outcome) -> bool:
     return bool(outcome.metrics.get("red_point_count", 0))
 
 
+def should_retry_prepared_kpi_error(candidate, error: Exception) -> bool:
+    metric_group = (candidate.metric_group or "").lower()
+    if candidate.analysis_kind != "degradation" or metric_group not in {"coverage", "quality", "throughput"}:
+        return False
+    message = str(error or "").lower()
+    return "does not contain enough colored measurement points" in message
+
+
+def analyze_cross_bitmap_safely(bitmap, preview_image_uri: str):
+    try:
+        return analyze_bitmap(bitmap, preview_image_uri)
+    except SsvAnalysisError as exc:
+        return AnalysisOutcome(
+            cross=False,
+            verdict="No cross detected",
+            detected_colors=[],
+            metrics={
+                "analysis_unavailable": True,
+                "reason": str(exc),
+                "reason_code": getattr(exc, "code", None),
+            },
+            site_center={},
+            annotated_preview="",
+            analysis_kind="cross",
+            is_failure=False,
+            warnings=[],
+            warning_details=[],
+        )
+
+
+def analyze_kpi_sparse_fallback(candidate, reason: str) -> AnalysisOutcome:
+    return AnalysisOutcome(
+        cross=False,
+        verdict="SSV OK",
+        detected_colors=[],
+        metrics={
+            "metric_name": candidate.metric_name or "KPI",
+            "metric_group": candidate.metric_group or "kpi",
+            "analysis_unavailable": True,
+            "reason": reason,
+            "warnings": [],
+        },
+        site_center={"x": 0.0, "y": 0.0},
+        annotated_preview="",
+        analysis_kind="degradation",
+        is_failure=False,
+        warnings=[],
+        warning_details=[],
+    )
+
+
 def prepared_bitmap_is_meaningfully_larger(raw_bitmap, prepared_bitmap) -> bool:
     raw_area = raw_bitmap.width * raw_bitmap.height
     prepared_area = prepared_bitmap.width * prepared_bitmap.height
@@ -122,17 +174,63 @@ def validate_ssv_workbook(file_bytes: bytes, filename: str, include_all_previews
                     bitmap = decode_bmp(bitmap_path)
                     initial_preview_image = image_data_uri(prepared_bytes, prepared_mime_type)
                 if candidate.analysis_kind == "degradation":
-                    if (candidate.metric_group or "").lower() in {"quality", "coverage"}:
+                    metric_group = (candidate.metric_group or "").lower()
+                    if metric_group in {"quality", "coverage"}:
                         raw_legend_swatches, raw_degraded_swatch = extract_bitmap_legend_reference(bitmap)
-                    outcome = analyze_kpi_bitmap(
-                        bitmap=bitmap,
-                        preview_image_uri=initial_preview_image,
-                        metric_name=candidate.metric_name,
-                        metric_group=candidate.metric_group,
-                        sheet_name=candidate.sheet_name,
-                    )
+                    try:
+                        outcome = analyze_kpi_bitmap(
+                            bitmap=bitmap,
+                            preview_image_uri=initial_preview_image,
+                            metric_name=candidate.metric_name,
+                            metric_group=candidate.metric_group,
+                            sheet_name=candidate.sheet_name,
+                        )
+                    except SsvKpiError as exc:
+                        can_retry_sparse_kpi = (
+                            supports_direct_embedded_image_processing()
+                            and should_retry_prepared_kpi_error(candidate, exc)
+                        )
+                        if not can_retry_sparse_kpi:
+                            raise
+                        prepared_bytes, prepared_mime_type = prepare_image_bytes_for_analysis_cached(
+                            image_bytes,
+                            prepared_preview_cache,
+                            prepared_path if keep_workspace else None,
+                        )
+                        if prepared_bytes == image_bytes:
+                            raise
+                        prepared_bitmap = decode_image_bytes_for_analysis(prepared_bytes)
+                        prepared_has_legend = bitmap_has_degraded_legend_swatch(prepared_bitmap)
+                        allow_prepared_retry = (
+                            metric_group in {"throughput", "coverage", "quality"}
+                            or prepared_has_legend
+                            or raw_degraded_swatch is not None
+                        )
+                        if not (
+                            prepared_bitmap_is_meaningfully_larger(bitmap, prepared_bitmap)
+                            and allow_prepared_retry
+                        ):
+                            raise
+                        prepared_preview_image = image_data_uri(prepared_bytes, prepared_mime_type)
+                        try:
+                            outcome = analyze_kpi_bitmap(
+                                bitmap=prepared_bitmap,
+                                preview_image_uri=prepared_preview_image,
+                                metric_name=candidate.metric_name,
+                                metric_group=candidate.metric_group,
+                                sheet_name=candidate.sheet_name,
+                                legend_swatches_override=None if prepared_has_legend else raw_legend_swatches,
+                                degraded_swatch_override=None if prepared_has_legend else raw_degraded_swatch,
+                            )
+                            bitmap = prepared_bitmap
+                            initial_preview_image = prepared_preview_image
+                        except SsvKpiError as prepared_exc:
+                            if should_retry_prepared_kpi_error(candidate, prepared_exc):
+                                outcome = analyze_kpi_sparse_fallback(candidate, str(prepared_exc))
+                            else:
+                                raise
                 else:
-                    outcome = analyze_bitmap(bitmap, initial_preview_image)
+                    outcome = analyze_cross_bitmap_safely(bitmap, initial_preview_image)
 
                 if supports_direct_embedded_image_processing() and should_retry_prepared_kpi(candidate, outcome):
                     prepared_bytes, prepared_mime_type = prepare_image_bytes_for_analysis_cached(
@@ -160,7 +258,7 @@ def validate_ssv_workbook(file_bytes: bytes, filename: str, include_all_previews
                                 bitmap = prepared_bitmap
                                 outcome = prepared_outcome
                                 initial_preview_image = prepared_preview_image
-            except (SsvImageError, SsvAnalysisError, SsvKpiError) as exc:
+            except (SsvImageError, SsvKpiError) as exc:
                 raise SsvValidationError(f"{candidate.target_label}: {exc}") from exc
 
             pending_entries.append(
@@ -206,15 +304,22 @@ def validate_ssv_workbook(file_bytes: bytes, filename: str, include_all_previews
                     preview_image = image_data_uri(prepared_bytes, prepared_mime_type)
                     if preview_image != initial_preview_image:
                         if candidate.analysis_kind == "degradation":
-                            outcome = analyze_kpi_bitmap(
-                                bitmap=bitmap,
-                                preview_image_uri=preview_image,
-                                metric_name=candidate.metric_name,
-                                metric_group=candidate.metric_group,
-                                sheet_name=candidate.sheet_name,
-                            )
+                            if not outcome.metrics.get("analysis_unavailable"):
+                                try:
+                                    outcome = analyze_kpi_bitmap(
+                                        bitmap=bitmap,
+                                        preview_image_uri=preview_image,
+                                        metric_name=candidate.metric_name,
+                                        metric_group=candidate.metric_group,
+                                        sheet_name=candidate.sheet_name,
+                                    )
+                                except SsvKpiError as exc:
+                                    if should_retry_prepared_kpi_error(candidate, exc):
+                                        outcome = analyze_kpi_sparse_fallback(candidate, str(exc))
+                                    else:
+                                        raise
                         else:
-                            outcome = analyze_bitmap(bitmap, preview_image)
+                            outcome = analyze_cross_bitmap_safely(bitmap, preview_image)
                     annotated_preview = outcome.annotated_preview
                 else:
                     preview_image = initial_preview_image

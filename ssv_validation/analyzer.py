@@ -24,8 +24,12 @@ LEGEND_X_RATIO = 0.22
 LEGEND_Y_RATIO = 0.25
 SITE_HISTOGRAM_X_RANGE = (0.45, 0.75)
 SITE_HISTOGRAM_Y_RANGE = (0.10, 0.55)
+SITE_HISTOGRAM_FALLBACK_X_RANGE = (0.05, 0.92)
+SITE_HISTOGRAM_FALLBACK_Y_RANGE = (0.05, 0.92)
 SITE_COLOR_SEARCH_X_RANGE = (0.35, 0.82)
 SITE_COLOR_SEARCH_Y_RANGE = (0.10, 0.60)
+SITE_COLOR_SEARCH_FALLBACK_X_RANGE = (0.05, 0.92)
+SITE_COLOR_SEARCH_FALLBACK_Y_RANGE = (0.05, 0.92)
 SITE_CENTER_WINDOW_RADIUS = 16
 SITE_CENTER_MIN_DENSITY = 35
 SITE_CENTER_SAMPLE_LIMIT = 90
@@ -67,6 +71,13 @@ BRANCH_COMPONENT_MAX_FILL = 0.45
 MIN_COLOR_PEAK_PIXELS = 30
 MIN_POINT_PIXELS_PER_COLOR = 80
 MIN_TOTAL_POINT_PIXELS = 300
+LOW_RES_CROSS_MAX_WIDTH = 900
+LOW_RES_CROSS_MAX_HEIGHT = 450
+LOW_RES_SITE_WINDOW_RADIUS = 16
+LOW_RES_MIN_COMPONENTS_PER_GROUP = 3
+LOW_RES_MIN_GROUPS = 2
+LOW_RES_EXCLUDE_NEAR_SITE_RADIUS = 25.0
+LOW_RES_CROSS_THRESHOLD = 0.35
 HUE_MATCH_FOR_SITE = 0.06
 HUE_MATCH_FOR_POINTS = 0.08
 MISASSIGN_MARGIN_DEG = 12.0
@@ -100,19 +111,57 @@ MINOR_PAIR_HO_ANGLE_MIN = 90.0
 class SsvAnalysisError(ValueError):
     """Raised when the extracted SSV image cannot be analyzed reliably."""
 
+    def __init__(self, message: str, code: str | None = None, details: dict[str, object] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+
 
 def analyze_bitmap(bitmap: Bitmap, preview_image_uri: str) -> AnalysisOutcome:
     stage_started = time.perf_counter()
     hsv_cache, colorful_mask = build_color_cache(bitmap)
     color_cache_s = time.perf_counter() - stage_started
 
-    stage_started = time.perf_counter()
     colorful_integral = build_integral_image(colorful_mask)
+    try:
+        return analyze_bitmap_dense(
+            bitmap=bitmap,
+            preview_image_uri=preview_image_uri,
+            hsv_cache=hsv_cache,
+            colorful_mask=colorful_mask,
+            colorful_integral=colorful_integral,
+            color_cache_s=color_cache_s,
+        )
+    except SsvAnalysisError as exc:
+        fallback = analyze_bitmap_low_res_fallback(
+            bitmap=bitmap,
+            preview_image_uri=preview_image_uri,
+            hsv_cache=hsv_cache,
+            colorful_mask=colorful_mask,
+            colorful_integral=colorful_integral,
+            primary_reason=str(exc),
+            primary_reason_code=getattr(exc, "code", None),
+            color_cache_s=color_cache_s,
+        )
+        if fallback is not None:
+            return fallback
+        raise
+
+
+def analyze_bitmap_dense(
+    bitmap: Bitmap,
+    preview_image_uri: str,
+    hsv_cache: Any,
+    colorful_mask: Any,
+    colorful_integral: Any,
+    color_cache_s: float,
+) -> AnalysisOutcome:
+    stage_started = time.perf_counter()
     site_center_hint = estimate_site_center_from_density(bitmap, colorful_mask, colorful_integral)
     site_hint_s = time.perf_counter() - stage_started
 
     stage_started = time.perf_counter()
-    sector_hues = detect_sector_hues(bitmap, hsv_cache, colorful_mask, colorful_integral, site_center_hint)
+    sector_hues, sector_hue_debug = detect_sector_hues(bitmap, hsv_cache, colorful_mask, colorful_integral, site_center_hint)
     sector_hues_s = time.perf_counter() - stage_started
 
     stage_started = time.perf_counter()
@@ -137,7 +186,10 @@ def analyze_bitmap(bitmap: Bitmap, preview_image_uri: str) -> AnalysisOutcome:
 
     total_points = sum(len(point_set["angles"]) for point_set in point_sets)
     if total_points < MIN_TOTAL_POINT_PIXELS:
-        raise SsvAnalysisError("The extracted image does not contain enough detected serving points to evaluate crossing.")
+        raise SsvAnalysisError(
+            "The extracted image does not contain enough detected serving points to evaluate crossing.",
+            code="insufficient_total_points",
+        )
 
     ordered_indices = sorted(range(len(point_sets)), key=lambda index: evaluation_angles[index])
     sector_boundaries = compute_sector_boundaries([evaluation_angles[index] for index in ordered_indices])
@@ -213,6 +265,8 @@ def analyze_bitmap(bitmap: Bitmap, preview_image_uri: str) -> AnalysisOutcome:
         "total_point_pixels": total_points,
         "min_angle_separation": round(min_angle_separation, 2),
         "confidence": round(confidence, 4),
+        "analysis_mode": "dense_cross_solver",
+        "dense_debug": sector_hue_debug,
         "warnings": warnings,
         "stage_timings": {
             "color_cache_s": round(color_cache_s, 4),
@@ -247,6 +301,456 @@ def analyze_bitmap(bitmap: Bitmap, preview_image_uri: str) -> AnalysisOutcome:
         warnings=warnings,
         warning_details=warning_details,
     )
+
+
+def analyze_bitmap_low_res_fallback(
+    bitmap: Bitmap,
+    preview_image_uri: str,
+    hsv_cache: Any,
+    colorful_mask: Any,
+    colorful_integral: Any,
+    primary_reason: str,
+    primary_reason_code: str | None,
+    color_cache_s: float,
+) -> AnalysisOutcome | None:
+    if bitmap.width > LOW_RES_CROSS_MAX_WIDTH or bitmap.height > LOW_RES_CROSS_MAX_HEIGHT:
+        return None
+
+    stage_started = time.perf_counter()
+    site_center = estimate_low_res_site_center(bitmap, colorful_mask, colorful_integral)
+    if site_center is None:
+        return None
+    site_hint_s = time.perf_counter() - stage_started
+
+    stage_started = time.perf_counter()
+    sector_groups = build_low_res_sector_groups(bitmap, site_center, colorful_mask)
+    grouping_s = time.perf_counter() - stage_started
+    if len(sector_groups) < LOW_RES_MIN_GROUPS:
+        return None
+    display_groups = infer_low_res_display_groups(bitmap, site_center, colorful_mask, sector_groups)
+
+    ordered_groups = sorted(sector_groups, key=lambda item: item["dominant_angle"])
+    ordered_colors: list[DetectedColor] = []
+    ordered_point_sets: list[dict[str, object]] = []
+    ordered_angles: list[float] = []
+
+    for output_index, group in enumerate(ordered_groups, start=1):
+        point_set = {
+            "angles": group["angles"],
+            "rgb_samples": group["rgb_samples"],
+            "rgb": average_rgb(group["rgb_samples"]),
+        }
+        ordered_point_sets.append(point_set)
+        ordered_angles.append(group["dominant_angle"])
+        ordered_colors.append(
+            DetectedColor(
+                name=f"sector_{output_index}",
+                rgb=point_set["rgb"],
+                hex=rgb_to_hex(point_set["rgb"]),
+                dominant_angle=group["dominant_angle"],
+                point_count=len(group["angles"]),
+                site_angle=group["dominant_angle"],
+            )
+        )
+
+    display_groups_sorted = sorted(display_groups, key=lambda item: item["dominant_angle"]) if display_groups else ordered_groups
+    display_colors = [
+        DetectedColor(
+            name=f"sector_{index + 1}",
+            rgb=average_rgb(group["rgb_samples"]),
+            hex=rgb_to_hex(average_rgb(group["rgb_samples"])),
+            dominant_angle=group["dominant_angle"],
+            point_count=len(group["angles"]),
+            site_angle=group["dominant_angle"],
+        )
+        for index, group in enumerate(display_groups_sorted)
+    ]
+    display_boundaries = compute_sector_boundaries([group["dominant_angle"] for group in display_groups_sorted])
+
+    total_points = sum(len(point_set["angles"]) for point_set in ordered_point_sets)
+    sector_boundaries = compute_sector_boundaries(ordered_angles)
+    misassigned_ratio = compute_misassigned_ratio(ordered_angles, ordered_point_sets)
+    mixed_bin_ratio = compute_mixed_bin_ratio(ordered_point_sets)
+    intrusion_ratios = compute_intrusion_ratios(ordered_angles, sector_boundaries, ordered_point_sets)
+    zone_matrix = compute_zone_matrix(sector_boundaries, ordered_point_sets)
+    max_intrusion_ratio = max(intrusion_ratios) if intrusion_ratios else 0.0
+    min_angle_separation = compute_min_angle_separation(ordered_angles)
+    confidence = compute_confidence(
+        total_points=max(total_points * 12, total_points),
+        min_angle_separation=min_angle_separation,
+        misassigned_ratio=misassigned_ratio,
+        mixed_bin_ratio=mixed_bin_ratio,
+        intrusion_ratio=max_intrusion_ratio,
+    )
+
+    cross = (
+        misassigned_ratio >= LOW_RES_CROSS_THRESHOLD
+        or mixed_bin_ratio >= LOW_RES_CROSS_THRESHOLD
+        or max_intrusion_ratio >= LOW_RES_CROSS_THRESHOLD
+    )
+    verdict = "Cross detected" if cross else "No cross detected"
+
+    metrics = {
+        "mixed_bin_ratio": round(mixed_bin_ratio, 4),
+        "misassigned_pixel_ratio": round(misassigned_ratio, 4),
+        "max_intrusion_ratio": round(max_intrusion_ratio, 4),
+        "intrusion_ratio_by_sector": {
+            f"sector_{index + 1}": round(intrusion_ratios[index], 4)
+            for index in range(len(intrusion_ratios))
+        },
+        "dominant_angles": {
+            f"sector_{index + 1}": round(ordered_angles[index], 2)
+            for index in range(len(ordered_angles))
+        },
+        "total_point_pixels": total_points,
+        "min_angle_separation": round(min_angle_separation, 2),
+        "confidence": round(confidence, 4),
+        "analysis_mode": "low_res_serving_pci_fallback",
+        "analysis_reason": primary_reason,
+        "analysis_reason_code": primary_reason_code,
+        "low_res_group_count": len(ordered_groups),
+        "display_sector_count": len(display_colors),
+        "inferred_sector_count": len([group for group in display_groups_sorted if group.get("inferred")]),
+        "stage_timings": {
+            "color_cache_s": round(color_cache_s, 4),
+            "site_hint_s": round(site_hint_s, 4),
+            "low_res_grouping_s": round(grouping_s, 4),
+        },
+    }
+
+    stage_started = time.perf_counter()
+    annotated_preview = build_annotated_preview(
+        bitmap=bitmap,
+        preview_image_uri=preview_image_uri,
+        site_center=site_center,
+        detected_colors=display_colors,
+        sector_boundaries=display_boundaries,
+        verdict=verdict,
+        metrics=metrics,
+    )
+    metrics["stage_timings"]["annotation_s"] = round(time.perf_counter() - stage_started, 4)
+
+    return AnalysisOutcome(
+        cross=cross,
+        verdict=verdict,
+        detected_colors=display_colors,
+        metrics=metrics,
+        site_center={"x": round(site_center[0], 2), "y": round(site_center[1], 2)},
+        annotated_preview=annotated_preview,
+        warnings=[],
+        warning_details=[],
+    )
+
+
+def estimate_low_res_site_center(
+    bitmap: Bitmap,
+    colorful_mask: Any,
+    colorful_integral: Any,
+) -> tuple[float, float] | None:
+    width = bitmap.width
+    height = bitmap.height
+    legend_x = int(width * LEGEND_X_RATIO)
+    legend_y = int(height * LEGEND_Y_RATIO)
+    candidates: list[tuple[int, int, int]] = []
+
+    for y in range(height):
+        for x in range(width):
+            if x < legend_x and y < legend_y:
+                continue
+            if not colorful_mask[y][x]:
+                continue
+            density = neighborhood_sum(colorful_integral, x, y, LOW_RES_SITE_WINDOW_RADIUS, width, height)
+            if density < SITE_CENTER_MIN_DENSITY:
+                continue
+            candidates.append((density, x, y))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    best_density = candidates[0][0]
+    selected = [candidate for candidate in candidates if candidate[0] >= (best_density * 0.90)][:18]
+    if not selected:
+        return None
+
+    total_weight = sum(candidate[0] for candidate in selected)
+    site_x = sum(candidate[0] * candidate[1] for candidate in selected) / total_weight
+    site_y = sum(candidate[0] * candidate[2] for candidate in selected) / total_weight
+    LOGGER.info("Estimated low-res site center: (%.2f, %.2f)", site_x, site_y)
+    return site_x, site_y
+
+
+def dense_image_scale(bitmap: Bitmap) -> float:
+    return max(1.0, math.hypot(bitmap.width, bitmap.height) / 1000.0)
+
+
+def scaled_radius(base_radius: int, scale: float, minimum: int) -> int:
+    return max(minimum, int(round(base_radius * scale)))
+
+
+def build_low_res_sector_groups(
+    bitmap: Bitmap,
+    site_center: tuple[float, float],
+    colorful_mask: Any,
+) -> list[dict[str, object]]:
+    grouped_components = collect_low_res_grouped_components(bitmap, site_center, colorful_mask)
+
+    groups: list[dict[str, object]] = []
+    for bin_index, grouped in grouped_components.items():
+        if len(grouped) < LOW_RES_MIN_COMPONENTS_PER_GROUP:
+            continue
+        selected = select_largest_angular_cluster(grouped)
+        if len(selected) < LOW_RES_MIN_COMPONENTS_PER_GROUP:
+            continue
+
+        angles = [entry["angle"] for entry in selected]
+        rgb_samples = [entry["mean_rgb"] for entry in selected]
+        groups.append(
+            {
+                "angles": angles,
+                "rgb_samples": rgb_samples,
+                "dominant_angle": circular_mean_degrees(angles),
+                "component_count": len(selected),
+                "bin_index": bin_index,
+            }
+        )
+
+    groups.sort(key=lambda item: (-item["component_count"], item["dominant_angle"]))
+    return groups[:3]
+
+
+def infer_low_res_display_groups(
+    bitmap: Bitmap,
+    site_center: tuple[float, float],
+    colorful_mask: Any,
+    strong_groups: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    if len(strong_groups) >= 3:
+        return sorted(strong_groups, key=lambda item: item["dominant_angle"])
+
+    grouped_components = collect_low_res_grouped_components(bitmap, site_center, colorful_mask)
+    legend_swatches = detect_cross_legend_swatches(bitmap)
+    strong_bins = {group["bin_index"] for group in strong_groups if "bin_index" in group}
+    strong_rgbs = [average_rgb(group["rgb_samples"]) for group in strong_groups]
+    strong_angles = [group["dominant_angle"] for group in strong_groups]
+    best_candidate: dict[str, object] | None = None
+
+    for bin_index, grouped in grouped_components.items():
+        if bin_index in strong_bins:
+            continue
+        selected = select_largest_angular_cluster(grouped)
+        if not selected:
+            continue
+        angles = [entry["angle"] for entry in selected]
+        dominant_angle = circular_mean_degrees(angles)
+        if strong_angles and min(angular_distance_degrees(dominant_angle, angle) for angle in strong_angles) < 20.0:
+            continue
+        candidate = {
+            "angles": angles,
+            "rgb_samples": [entry["mean_rgb"] for entry in selected],
+            "dominant_angle": dominant_angle,
+            "component_count": len(selected),
+            "bin_index": bin_index,
+            "inferred": True,
+        }
+        if best_candidate is None or candidate["component_count"] > best_candidate["component_count"]:
+            best_candidate = candidate
+
+    display_groups = list(strong_groups)
+    if best_candidate is not None:
+        legend_rgb = select_missing_legend_swatch(legend_swatches, strong_rgbs, average_rgb(best_candidate["rgb_samples"]))
+        if legend_rgb is not None:
+            best_candidate["rgb_samples"] = [legend_rgb]
+            best_candidate["legend_rgb"] = legend_rgb
+        display_groups.append(best_candidate)
+    return sorted(display_groups, key=lambda item: item["dominant_angle"])
+
+
+def collect_low_res_grouped_components(
+    bitmap: Bitmap,
+    site_center: tuple[float, float],
+    colorful_mask: Any,
+) -> dict[int, list[dict[str, object]]]:
+    components = extract_components(colorful_mask)
+    grouped_components: dict[int, list[dict[str, object]]] = {}
+
+    for component in components:
+        if not is_low_res_cross_point_component(bitmap, component):
+            continue
+        if component_min_distance(component, site_center) <= LOW_RES_EXCLUDE_NEAR_SITE_RADIUS:
+            continue
+
+        mean_rgb = component_mean_rgb(bitmap, component)
+        hue, saturation, value = rgb_to_hsv(*mean_rgb)
+        hue_degrees = hue * 360.0
+        if saturation < COLOR_SATURATION_THRESHOLD or value < COLOR_VALUE_THRESHOLD:
+            continue
+        if 20.0 <= hue_degrees < 80.0:
+            continue
+
+        bin_index = hue_bin_index(hue_degrees)
+        grouped_components.setdefault(bin_index, []).append(
+            {
+                "component": component,
+                "mean_rgb": mean_rgb,
+                "angle": component_center_angle(component, site_center),
+            }
+        )
+    return grouped_components
+
+
+def detect_cross_legend_swatches(bitmap: Bitmap) -> list[tuple[int, int, int]]:
+    width = bitmap.width
+    height = bitmap.height
+    legend_x = int(width * LEGEND_X_RATIO)
+    legend_y = int(height * LEGEND_Y_RATIO)
+    mask = [[0] * legend_x for _ in range(legend_y)]
+
+    for y in range(legend_y):
+        for x in range(legend_x):
+            red, green, blue = rgb_pixel(bitmap, x, y)
+            hue, saturation, value = rgb_to_hsv(red, green, blue)
+            if saturation >= COLOR_SATURATION_THRESHOLD and value >= COLOR_VALUE_THRESHOLD:
+                mask[y][x] = 1
+
+    swatches: list[tuple[int, int, int]] = []
+    for component in extract_components(mask):
+        area = int(component["area"])
+        comp_width = int(component["width"])
+        comp_height = int(component["height"])
+        fill_ratio = area / max(comp_width * comp_height, 1)
+        if area < 18 or area > 200:
+            continue
+        if comp_width < 4 or comp_height < 4:
+            continue
+        if fill_ratio < 0.6:
+            continue
+        swatches.append(component_mean_rgb(bitmap, component))
+
+    unique_swatches: list[tuple[int, int, int]] = []
+    for rgb in swatches:
+        if any(rgb_distance(rgb, existing) < 35.0 for existing in unique_swatches):
+            continue
+        unique_swatches.append(rgb)
+    return unique_swatches
+
+
+def select_missing_legend_swatch(
+    legend_swatches: list[tuple[int, int, int]],
+    strong_rgbs: list[tuple[int, int, int]],
+    candidate_rgb: tuple[int, int, int],
+) -> tuple[int, int, int] | None:
+    unmatched = [
+        swatch
+        for swatch in legend_swatches
+        if all(rgb_distance(swatch, strong_rgb) >= 60.0 for strong_rgb in strong_rgbs)
+    ]
+    if not unmatched:
+        return None
+    return min(unmatched, key=lambda swatch: rgb_distance(swatch, candidate_rgb))
+
+
+def is_low_res_cross_point_component(bitmap: Bitmap, component: dict[str, object]) -> bool:
+    if not is_point_like_component(component):
+        return False
+
+    area = int(component["area"])
+    width = int(component["width"])
+    height = int(component["height"])
+    fill_ratio = area / max(width * height, 1)
+    if fill_ratio < 0.35:
+        return False
+    if abs(width - height) > 4:
+        return False
+    if component_inner_bright_ratio(bitmap, component) > 0.22:
+        return False
+    return True
+
+
+def component_mean_rgb(bitmap: Bitmap, component: dict[str, object]) -> tuple[int, int, int]:
+    samples = [rgb_pixel(bitmap, x, y) for x, y in component["pixels"]]
+    return average_rgb(samples)
+
+
+def component_center_angle(component: dict[str, object], site_center: tuple[float, float]) -> float:
+    min_x, min_y, max_x, max_y = component["bbox"]
+    center_x = (min_x + max_x) / 2.0
+    center_y = (min_y + max_y) / 2.0
+    site_x, site_y = site_center
+    return angle_from_center(center_x - site_x, center_y - site_y)
+
+
+def component_inner_bright_ratio(bitmap: Bitmap, component: dict[str, object]) -> float:
+    min_x, min_y, max_x, max_y = component["bbox"]
+    width = max_x - min_x + 1
+    height = max_y - min_y + 1
+    if width < 4 or height < 4:
+        return 0.0
+
+    inset_x = max(1, width // 4)
+    inset_y = max(1, height // 4)
+    start_x = min_x + inset_x
+    end_x = max_x - inset_x
+    start_y = min_y + inset_y
+    end_y = max_y - inset_y
+    if start_x > end_x or start_y > end_y:
+        return 0.0
+
+    bright_pixels = 0
+    total_pixels = 0
+    for y in range(start_y, end_y + 1):
+        for x in range(start_x, end_x + 1):
+            red, green, blue = rgb_pixel(bitmap, x, y)
+            total_pixels += 1
+            if red >= 225 and green >= 225 and blue >= 225:
+                bright_pixels += 1
+    if total_pixels == 0:
+        return 0.0
+    return bright_pixels / total_pixels
+
+
+def hue_bin_index(hue_degrees: float) -> int:
+    return int(((hue_degrees + 15.0) % 360.0) // 30.0)
+
+
+def select_largest_angular_cluster(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    if len(entries) <= LOW_RES_MIN_COMPONENTS_PER_GROUP:
+        return entries
+
+    sorted_entries = sorted(entries, key=lambda item: item["angle"])
+    clusters: list[list[dict[str, object]]] = []
+    current_cluster = [sorted_entries[0]]
+
+    for entry in sorted_entries[1:]:
+        if angular_distance_degrees(entry["angle"], current_cluster[-1]["angle"]) <= 40.0:
+            current_cluster.append(entry)
+            continue
+        clusters.append(current_cluster)
+        current_cluster = [entry]
+    clusters.append(current_cluster)
+
+    if len(clusters) >= 2:
+        first_angle = clusters[0][0]["angle"]
+        last_angle = clusters[-1][-1]["angle"]
+        wrap_gap = (first_angle + 360.0) - last_angle
+        if wrap_gap <= 40.0:
+            merged = clusters[-1] + clusters[0]
+            clusters = [merged] + clusters[1:-1]
+
+    clusters.sort(
+        key=lambda cluster: (
+            -len(cluster),
+            -angular_cluster_span(cluster),
+        )
+    )
+    return clusters[0]
+
+
+def angular_cluster_span(cluster: list[dict[str, object]]) -> float:
+    if len(cluster) <= 1:
+        return 0.0
+    ordered_angles = sorted(item["angle"] for item in cluster)
+    return ordered_angles[-1] - ordered_angles[0]
 
 
 def build_color_cache(bitmap: Bitmap) -> tuple[Any, Any]:
@@ -290,10 +794,69 @@ def estimate_site_center_from_density(
     height = bitmap.height
     prior_x = width * 0.60
     prior_y = height * 0.32
-    x_start = int(width * SITE_HISTOGRAM_X_RANGE[0])
-    x_end = int(width * SITE_HISTOGRAM_X_RANGE[1])
-    y_start = int(height * SITE_HISTOGRAM_Y_RANGE[0])
-    y_end = int(height * SITE_HISTOGRAM_Y_RANGE[1])
+    candidates = collect_site_center_candidates(
+        colorful_mask=colorful_mask,
+        colorful_integral=colorful_integral,
+        width=width,
+        height=height,
+        prior_x=prior_x,
+        prior_y=prior_y,
+        x_range=SITE_HISTOGRAM_X_RANGE,
+        y_range=SITE_HISTOGRAM_Y_RANGE,
+    )
+    if not candidates:
+        candidates = collect_site_center_candidates(
+            colorful_mask=colorful_mask,
+            colorful_integral=colorful_integral,
+            width=width,
+            height=height,
+            prior_x=prior_x,
+            prior_y=prior_y,
+            x_range=SITE_HISTOGRAM_FALLBACK_X_RANGE,
+            y_range=SITE_HISTOGRAM_FALLBACK_Y_RANGE,
+        )
+    if not candidates:
+        raise SsvAnalysisError(
+            "The serving-site center could not be estimated from the extracted image.",
+            code="insufficient_site_center_density",
+            details={
+                "primary_search_x_range": SITE_HISTOGRAM_X_RANGE,
+                "primary_search_y_range": SITE_HISTOGRAM_Y_RANGE,
+                "fallback_search_x_range": SITE_HISTOGRAM_FALLBACK_X_RANGE,
+                "fallback_search_y_range": SITE_HISTOGRAM_FALLBACK_Y_RANGE,
+            },
+        )
+
+    candidates.sort(key=lambda item: (-item[0], item[2]))
+    score_floor = candidates[0][0] * SITE_CENTER_SCORE_FLOOR_RATIO
+    selected = [candidate for candidate in candidates if candidate[0] >= score_floor][:SITE_CENTER_SAMPLE_LIMIT]
+    if not selected:
+        raise SsvAnalysisError(
+            "The serving-site center could not be estimated from the extracted image.",
+            code="insufficient_site_center_density",
+        )
+
+    total_weight = sum(max(candidate[0], 1.0) for candidate in selected)
+    site_x = sum(max(candidate[0], 1.0) * candidate[3] for candidate in selected) / total_weight
+    site_y = sum(max(candidate[0], 1.0) * candidate[4] for candidate in selected) / total_weight
+    LOGGER.info("Estimated coarse site center: (%.2f, %.2f)", site_x, site_y)
+    return site_x, site_y
+
+
+def collect_site_center_candidates(
+    colorful_mask: Any,
+    colorful_integral: Any,
+    width: int,
+    height: int,
+    prior_x: float,
+    prior_y: float,
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+) -> list[tuple[float, int, float, int, int]]:
+    x_start = int(width * x_range[0])
+    x_end = int(width * x_range[1])
+    y_start = int(height * y_range[0])
+    y_end = int(height * y_range[1])
 
     candidates: list[tuple[float, int, float, int, int]] = []
     for y in range(y_start, y_end):
@@ -308,21 +871,7 @@ def estimate_site_center_from_density(
             distance_to_prior = math.sqrt(((x - prior_x) ** 2) + ((y - prior_y) ** 2))
             score = density - (distance_to_prior * SITE_CENTER_DISTANCE_WEIGHT)
             candidates.append((score, density, distance_to_prior, x, y))
-
-    if not candidates:
-        raise SsvAnalysisError("The serving-site center could not be estimated from the extracted image.")
-
-    candidates.sort(key=lambda item: (-item[0], item[2]))
-    score_floor = candidates[0][0] * SITE_CENTER_SCORE_FLOOR_RATIO
-    selected = [candidate for candidate in candidates if candidate[0] >= score_floor][:SITE_CENTER_SAMPLE_LIMIT]
-    if not selected:
-        raise SsvAnalysisError("The serving-site center could not be estimated from the extracted image.")
-
-    total_weight = sum(max(candidate[0], 1.0) for candidate in selected)
-    site_x = sum(max(candidate[0], 1.0) * candidate[3] for candidate in selected) / total_weight
-    site_y = sum(max(candidate[0], 1.0) * candidate[4] for candidate in selected) / total_weight
-    LOGGER.info("Estimated coarse site center: (%.2f, %.2f)", site_x, site_y)
-    return site_x, site_y
+    return candidates
 
 
 def detect_sector_hues(
@@ -331,17 +880,23 @@ def detect_sector_hues(
     colorful_mask: list[list[int]],
     colorful_integral: list[list[int]],
     site_center: tuple[float, float],
-) -> list[float]:
+) -> tuple[list[float], dict[str, object]]:
     hist = [0.0] * 36
     width = bitmap.width
     height = bitmap.height
     site_x, site_y = site_center
-    x_start = max(0, int(site_x - SITE_FAN_OUTER_RADIUS))
-    x_end = min(width, int(site_x + SITE_FAN_OUTER_RADIUS + 1))
-    y_start = max(0, int(site_y - SITE_FAN_OUTER_RADIUS))
-    y_end = min(height, int(site_y + SITE_FAN_OUTER_RADIUS + 1))
+    scale = dense_image_scale(bitmap)
+    fan_inner = scaled_radius(SITE_FAN_INNER_RADIUS, scale, SITE_FAN_INNER_RADIUS)
+    fan_outer = scaled_radius(SITE_FAN_OUTER_RADIUS, scale, SITE_FAN_OUTER_RADIUS)
+    fan_target = scaled_radius(SITE_FAN_TARGET_RADIUS, scale, SITE_FAN_TARGET_RADIUS)
+    fan_density_radius = scaled_radius(SITE_FAN_DENSITY_RADIUS, scale, SITE_FAN_DENSITY_RADIUS)
+    x_start = max(0, int(site_x - fan_outer))
+    x_end = min(width, int(site_x + fan_outer + 1))
+    y_start = max(0, int(site_y - fan_outer))
+    y_end = min(height, int(site_y + fan_outer + 1))
 
     peaks: list[int] = []
+    fan_pixels = 0
     for y in range(y_start, y_end):
         for x in range(x_start, x_end):
             if not colorful_mask[y][x]:
@@ -350,16 +905,17 @@ def detect_sector_hues(
             dx = x - site_x
             dy = y - site_y
             radius = math.sqrt((dx * dx) + (dy * dy))
-            if radius < SITE_FAN_INNER_RADIUS or radius > SITE_FAN_OUTER_RADIUS:
+            if radius < fan_inner or radius > fan_outer:
                 continue
 
-            density = neighborhood_sum(colorful_integral, x, y, SITE_FAN_DENSITY_RADIUS, width, height)
+            density = neighborhood_sum(colorful_integral, x, y, fan_density_radius, width, height)
             if density < SITE_FAN_MIN_DENSITY:
                 continue
 
             hue = hsv_pixel(hsv_cache, x, y)[0]
-            radial_weight = max(0.2, 1.0 - (abs(radius - SITE_FAN_TARGET_RADIUS) / SITE_FAN_OUTER_RADIUS))
+            radial_weight = max(0.2, 1.0 - (abs(radius - fan_target) / fan_outer))
             hist[int(hue * 36) % 36] += density * radial_weight
+            fan_pixels += 1
 
     for count, index in sorted(((value, idx) for idx, value in enumerate(hist)), reverse=True):
         if count < float(MIN_COLOR_PEAK_PIXELS * 6):
@@ -370,11 +926,25 @@ def detect_sector_hues(
         if len(peaks) == 3:
             break
 
+    used_fallback = False
     if len(peaks) < 3:
         peaks = detect_sector_hues_fallback(bitmap, hsv_cache, colorful_mask, colorful_integral)
+        used_fallback = True
 
     LOGGER.info("Detected sector hue peaks: %s", peaks)
-    return [((peak + 0.5) / 36.0) for peak in peaks]
+    return (
+        [((peak + 0.5) / 36.0) for peak in peaks],
+        {
+            "fan_pixels": fan_pixels,
+            "fan_hist_max": round(max(hist) if hist else 0.0, 2),
+            "sector_hue_count": len(peaks),
+            "used_histogram_fallback": used_fallback,
+            "fan_inner_radius": fan_inner,
+            "fan_outer_radius": fan_outer,
+            "fan_density_radius": fan_density_radius,
+            "scale_factor": round(scale, 3),
+        },
+    )
 
 
 def detect_sector_hues_fallback(
@@ -412,7 +982,11 @@ def detect_sector_hues_fallback(
             break
 
     if len(peaks) < 3:
-        raise SsvAnalysisError("The serving-sector colors could not be identified from the extracted image.")
+        raise SsvAnalysisError(
+            "The serving-sector colors could not be identified from the extracted image.",
+            code="insufficient_sector_colors",
+            details={"peak_count": len(peaks), "peak_threshold": MIN_COLOR_PEAK_PIXELS},
+        )
 
     return peaks
 
@@ -428,10 +1002,61 @@ def estimate_site_center(
     width = bitmap.width
     height = bitmap.height
     prior_x, prior_y = site_center_hint
-    x_start = int(width * SITE_COLOR_SEARCH_X_RANGE[0])
-    x_end = int(width * SITE_COLOR_SEARCH_X_RANGE[1])
-    y_start = int(height * SITE_COLOR_SEARCH_Y_RANGE[0])
-    y_end = int(height * SITE_COLOR_SEARCH_Y_RANGE[1])
+    scale = dense_image_scale(bitmap)
+    fan_outer = scaled_radius(SITE_FAN_OUTER_RADIUS, scale, SITE_FAN_OUTER_RADIUS)
+    color_centers = collect_sector_color_centers(
+        bitmap=bitmap,
+        hsv_cache=hsv_cache,
+        colorful_mask=colorful_mask,
+        colorful_integral=colorful_integral,
+        sector_hues=sector_hues,
+        prior_x=prior_x,
+        prior_y=prior_y,
+        fan_outer=fan_outer,
+        x_range=SITE_COLOR_SEARCH_X_RANGE,
+        y_range=SITE_COLOR_SEARCH_Y_RANGE,
+    )
+    if len(color_centers) < 3:
+        color_centers = collect_sector_color_centers(
+            bitmap=bitmap,
+            hsv_cache=hsv_cache,
+            colorful_mask=colorful_mask,
+            colorful_integral=colorful_integral,
+            sector_hues=sector_hues,
+            prior_x=prior_x,
+            prior_y=prior_y,
+            fan_outer=fan_outer,
+            x_range=SITE_COLOR_SEARCH_FALLBACK_X_RANGE,
+            y_range=SITE_COLOR_SEARCH_FALLBACK_Y_RANGE,
+        )
+
+    if len(color_centers) < 3:
+        return site_center_hint
+
+    site_x = sum(center[0] for center in color_centers) / len(color_centers)
+    site_y = sum(center[1] for center in color_centers) / len(color_centers)
+    LOGGER.info("Estimated site center: (%.2f, %.2f)", site_x, site_y)
+    return site_x, site_y
+
+
+def collect_sector_color_centers(
+    bitmap: Bitmap,
+    hsv_cache: Any,
+    colorful_mask: Any,
+    colorful_integral: Any,
+    sector_hues: list[float],
+    prior_x: float,
+    prior_y: float,
+    fan_outer: int,
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+) -> list[tuple[float, float]]:
+    width = bitmap.width
+    height = bitmap.height
+    x_start = int(width * x_range[0])
+    x_end = int(width * x_range[1])
+    y_start = int(height * y_range[0])
+    y_end = int(height * y_range[1])
 
     color_centers: list[tuple[float, float]] = []
     for sector_hue in sector_hues:
@@ -450,7 +1075,7 @@ def estimate_site_center(
                     continue
 
                 distance = ((x - prior_x) ** 2) + ((y - prior_y) ** 2)
-                if distance > (SITE_FAN_OUTER_RADIUS * SITE_FAN_OUTER_RADIUS * 2.25):
+                if distance > (fan_outer * fan_outer * 2.25):
                     continue
                 weighted_pixels.append((distance, x, y))
 
@@ -465,14 +1090,7 @@ def estimate_site_center(
                 sum(item[2] for item in closest_pixels) / len(closest_pixels),
             )
         )
-
-    if len(color_centers) < 3:
-        return site_center_hint
-
-    site_x = sum(center[0] for center in color_centers) / len(color_centers)
-    site_y = sum(center[1] for center in color_centers) / len(color_centers)
-    LOGGER.info("Estimated site center: (%.2f, %.2f)", site_x, site_y)
-    return site_x, site_y
+    return color_centers
 
 
 def segment_point_clouds(
@@ -593,7 +1211,10 @@ def segment_point_clouds(
             angles, rgb_samples = collect_component_samples(fallback_components, bitmap, site_center)
 
         if len(angles) < MIN_POINT_PIXELS_PER_COLOR:
-            raise SsvAnalysisError("The extracted image does not contain enough separated serving points for each sector.")
+            raise SsvAnalysisError(
+                "The extracted image does not contain enough separated serving points for each sector.",
+                code="insufficient_sector_points",
+            )
         point_sets[sector_index]["angles"] = angles
         point_sets[sector_index]["rgb_samples"] = rgb_samples
         point_sets[sector_index]["rgb"] = average_rgb(rgb_samples)
@@ -616,22 +1237,26 @@ def extract_sector_signatures(
 ) -> list[dict[str, object]]:
     site_x, site_y = site_center
     signatures: list[dict[str, object]] = []
+    scale = dense_image_scale(bitmap)
+    fan_inner = scaled_radius(SITE_FAN_INNER_RADIUS, scale, SITE_FAN_INNER_RADIUS)
+    fan_outer = scaled_radius(SITE_FAN_OUTER_RADIUS, scale, SITE_FAN_OUTER_RADIUS)
+    fan_density_radius = scaled_radius(SITE_FAN_DENSITY_RADIUS, scale, SITE_FAN_DENSITY_RADIUS)
 
     for sector_hue in sector_hues:
         samples: list[tuple[int, int, int]] = []
         sample_angles: list[float] = []
-        for y in range(max(0, int(site_y - SITE_FAN_OUTER_RADIUS)), min(bitmap.height, int(site_y + SITE_FAN_OUTER_RADIUS + 1))):
-            for x in range(max(0, int(site_x - SITE_FAN_OUTER_RADIUS)), min(bitmap.width, int(site_x + SITE_FAN_OUTER_RADIUS + 1))):
+        for y in range(max(0, int(site_y - fan_outer)), min(bitmap.height, int(site_y + fan_outer + 1))):
+            for x in range(max(0, int(site_x - fan_outer)), min(bitmap.width, int(site_x + fan_outer + 1))):
                 if not colorful_mask[y][x]:
                     continue
 
                 dx = x - site_x
                 dy = y - site_y
                 radius = math.sqrt((dx * dx) + (dy * dy))
-                if radius < SITE_FAN_INNER_RADIUS or radius > (SITE_FAN_OUTER_RADIUS - 6):
+                if radius < fan_inner or radius > max(fan_inner + 1, fan_outer - 6):
                     continue
 
-                density = neighborhood_sum(colorful_integral, x, y, SITE_FAN_DENSITY_RADIUS, bitmap.width, bitmap.height)
+                density = neighborhood_sum(colorful_integral, x, y, fan_density_radius, bitmap.width, bitmap.height)
                 if density < SITE_FAN_MIN_DENSITY:
                     continue
 
@@ -643,7 +1268,10 @@ def extract_sector_signatures(
                 sample_angles.append(angle_from_center(dx, dy))
 
         if not samples:
-            raise SsvAnalysisError("The serving-sector colors could not be sampled reliably from the site fan.")
+            raise SsvAnalysisError(
+                "The serving-sector colors could not be sampled reliably from the site fan.",
+                code="insufficient_sector_samples",
+            )
 
         signatures.append(
             {
@@ -1230,22 +1858,12 @@ def build_annotated_preview(
             'stroke="#ffffff" stroke-width="2" stroke-dasharray="5 4" opacity="0.65" />'
         )
 
-    swatches = []
-    for index, detected_color in enumerate(detected_colors):
-        swatch_y = height - 64 + (index * 18)
-        swatches.append(
-            f'<rect x="14" y="{swatch_y}" width="14" height="14" rx="3" fill="{detected_color.hex}" />'
-            f'<text x="36" y="{swatch_y + 11}" fill="#ffffff" font-size="12" font-family="Inter, sans-serif">'
-            f'{detected_color.name}: {detected_color.hex} @ {detected_color.dominant_angle:.1f}°</text>'
-        )
-
     svg = f"""
 <svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
   <image href="{preview_image_uri}" width="{width}" height="{height}" />
   {''.join(overlay_lines)}
   <circle cx="{site_x:.2f}" cy="{site_y:.2f}" r="8" fill="none" stroke="#ffffff" stroke-width="3" />
   <circle cx="{site_x:.2f}" cy="{site_y:.2f}" r="3" fill="#ffffff" />
-  {''.join(swatches)}
 </svg>
 """.strip()
 

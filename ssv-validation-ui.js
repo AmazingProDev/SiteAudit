@@ -265,25 +265,6 @@
         return `SSV NOK : ${summaryParts.join(' | ')}`;
     }
 
-    function renderColors(colors, target) {
-        target.innerHTML = '';
-        colors.forEach((entry) => {
-            const item = document.createElement('div');
-            item.className = 'ssv-color-pill';
-
-            const swatch = document.createElement('span');
-            swatch.className = 'ssv-color-swatch';
-            swatch.style.background = entry.hex;
-
-            const text = document.createElement('span');
-            text.textContent = `${entry.name} (${entry.dominant_angle.toFixed(1)}°)`;
-
-            item.appendChild(swatch);
-            item.appendChild(text);
-            target.appendChild(item);
-        });
-    }
-
     function createThroughputNotice() {
         const notice = document.createElement('div');
         notice.className = 'ssv-throughput-notice';
@@ -329,11 +310,14 @@
     }
 
     function getVisibleAnalyses(analyses) {
+        const failedAnalyses = analyses.filter((analysis) => Boolean(analysis.isFailure ?? analysis.cross));
+        if (!failedAnalyses.length) {
+            return analyses;
+        }
         if (showAllAnalyses) {
             return analyses;
         }
-        const failedAnalyses = analyses.filter((analysis) => Boolean(analysis.isFailure ?? analysis.cross));
-        return failedAnalyses.length ? failedAnalyses : analyses;
+        return failedAnalyses;
     }
 
     function createThroughputDetails(analysis, throughputSummary) {
@@ -371,11 +355,13 @@
             const label = analysis.label || '';
             const metricGroup = (analysis.metrics || {}).metric_group || analysis.selection?.metricGroup;
 
-            if (label === 'Débit DL') return 0;
-            if (label === 'Débit UL') return 1;
-            if (analysis.analysisKind === 'cross') return 2;
+            if (analysis.analysisKind === 'cross' && label === 'Serving PCI') return 0;
+            if (analysis.analysisKind === 'cross' && label === 'Serving Cell ID') return 1;
+            if (analysis.analysisKind === 'cross' && label === 'Best Server') return 2;
             if (metricGroup === 'coverage') return 3;
             if (metricGroup === 'quality') return 4;
+            if (label === 'Débit DL') return 5;
+            if (label === 'Débit UL') return 6;
             return 5;
         }
 
@@ -474,18 +460,9 @@
                 hasVisual = true;
             }
 
-            const localColorList = document.createElement('div');
-            localColorList.className = 'ssv-color-list';
-            if ((analysis.detected_colors || []).length) {
-                renderColors(analysis.detected_colors || [], localColorList);
-            }
-
             card.appendChild(header);
             if (hasVisual) {
                 card.appendChild(grid);
-            }
-            if ((analysis.detected_colors || []).length) {
-                card.appendChild(localColorList);
             }
             analysisList.appendChild(card);
         });
@@ -493,8 +470,9 @@
 
     function renderResult(payload, filename) {
         const analyses = payload.analyses && payload.analyses.length ? payload.analyses : [payload];
+        const failedCount = analyses.filter((analysis) => Boolean(analysis.isFailure ?? analysis.cross)).length;
         latestAnalyses = analyses;
-        showAllAnalyses = pendingShowAllAfterReload;
+        showAllAnalyses = failedCount === 0 ? true : pendingShowAllAfterReload;
         latestIncludesAllPreviews = Boolean(payload.includesAllPreviews);
         pendingShowAllAfterReload = false;
         verdict.textContent = payload.verdict;
@@ -514,7 +492,6 @@
             verdictMeta.textContent = failureSummary;
         }
         if (summaryControls && toggleAnalysesButton) {
-            const failedCount = analyses.filter((analysis) => Boolean(analysis.isFailure ?? analysis.cross)).length;
             const canToggle = failedCount > 0 && failedCount < analyses.length;
             summaryControls.hidden = !canToggle;
             toggleAnalysesButton.textContent = showAllAnalyses ? 'Show only NOK' : 'Show all analysis';

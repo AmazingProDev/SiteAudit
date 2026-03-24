@@ -32,10 +32,14 @@ TARGET_IMAGE_PROFILES = (
         "analysis_kind": "cross",
         "phrases": (
             "800 cells pci de la cellules serveuse",
+            "2600 cells pci de la cellules serveuse",
+            "1800 cells pci de la cellules serveuse",
+            "cells pci de la cellules serveuse",
+            "pci de la cellules serveuse",
             "serving cell pci",
             "serving pci",
         ),
-        "tokens": ("800", "cells", "pci", "serveuse"),
+        "tokens": ("cells", "pci", "serveuse"),
     },
     {
         "key": "serving_cell_id",

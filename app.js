@@ -52,6 +52,27 @@ function colLettersToIndex(colStr) {
         .reduce((acc, char) => (acc * 26) + (char.charCodeAt(0) - 64), 0) - 1;
 }
 
+function normalizeWorkbookCoordinates(latValue, lngValue) {
+    const lat = Number.parseFloat(latValue);
+    const lng = Number.parseFloat(lngValue);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return null;
+    }
+
+    const normalizedLat = Math.abs(lat);
+    const normalizedLng = -Math.abs(lng);
+
+    if (normalizedLat > 90 || Math.abs(normalizedLng) > 180) {
+        return null;
+    }
+
+    return {
+        lat: normalizedLat,
+        lng: normalizedLng,
+    };
+}
+
 function getSectorImageMedia(sector) {
     if (!sector) return [];
     if (Array.isArray(sector.media) && sector.media.length > 0) return sector.media;
@@ -316,12 +337,13 @@ async function handleExcelUpload(file) {
             }
         }
         
-        if (coordRows.length > 0) {
-            const r = coordRows[0];
-            const rowObj = cellsData[r];
-            
-            let latCol = null, lngCol = null;
-            const cols = Object.keys(rowObj).sort(); // Sort alphabetically A, B, C...
+        function extractGpsCandidate(rowNumber) {
+            const rowObj = cellsData[rowNumber];
+            if (!rowObj) return null;
+
+            let latCol = null;
+            let lngCol = null;
+            const cols = Object.keys(rowObj).sort();
             for (let i = 0; i < cols.length; i++) {
                 const cStr = cols[i];
                 const cell = rowObj[cStr];
@@ -330,18 +352,26 @@ async function handleExcelUpload(file) {
                     if (cell.value.includes('Long:') && i + 1 < cols.length) lngCol = cols[i + 1];
                 }
             }
-            
-            cgpsLat = latCol ? parseFloat(rowObj[latCol].value) : null;
-            cgpsLng = lngCol ? parseFloat(rowObj[lngCol].value) : null;
-            
-            // Moroccan Site Auto-Correction (Lat MUST be North/Positive, Lng MUST be West/Negative)
-            if (cgpsLat !== null) cgpsLat = Math.abs(cgpsLat);
-            if (cgpsLng !== null) cgpsLng = -Math.abs(cgpsLng);
-            
-            extractConfigAzimuths(r, avantConfig);
+
+            if (!latCol || !lngCol) return null;
+            return normalizeWorkbookCoordinates(rowObj[latCol]?.value, rowObj[lngCol]?.value);
+        }
+
+        if (coordRows.length > 0) {
+            extractConfigAzimuths(coordRows[0], avantConfig);
         }
         if (coordRows.length > 1) {
             extractConfigAzimuths(coordRows[1], apresConfig);
+        }
+
+        const gpsCandidates = coordRows
+            .map((rowNumber) => extractGpsCandidate(rowNumber))
+            .filter((candidate) => candidate !== null);
+
+        if (gpsCandidates.length > 0) {
+            const bestGps = gpsCandidates[gpsCandidates.length - 1];
+            cgpsLat = bestGps.lat;
+            cgpsLng = bestGps.lng;
         }
         
         // 6. Finding Photos Azimut anchor rows
@@ -1598,20 +1628,96 @@ function getLayerColor(type, val) {
 window.polygonsByCellName = {};
 window.neighborPairs = [];
 window.isNeighborsLoaded = false;
+window.activeNeighborHighlight = null;
+
+function normalizeNeighborIdentifier(value) {
+    return String(value || '')
+        .trim()
+        .toUpperCase()
+        .replace(/\s+/g, '')
+        .replace(/_+/g, '_');
+}
+
+function normalizeNeighborSiteKey(value) {
+    return normalizeNeighborIdentifier(value)
+        .replace(/^[234]G_/i, '')
+        .replace(/_\d+$/, '');
+}
+
+function resetNeighborSectorHighlights() {
+    bddMapLayers.forEach((layer) => {
+        if (!layer.isSector) return;
+        layer.setStyle({
+            weight: 1,
+            color: layer.originalColor,
+            fillColor: layer.originalColor,
+            fillOpacity: 0.8
+        });
+    });
+}
+
+function applyNeighborSectorHighlights() {
+    resetNeighborSectorHighlights();
+    if (!window.activeNeighborHighlight) return;
+
+    const sourceCellName = window.activeNeighborHighlight.sourceCellName;
+    const targetIdentifiers = new Set(window.activeNeighborHighlight.targetIdentifiers || []);
+
+    bddMapLayers.forEach((layer) => {
+        if (!layer.isSector) return;
+        const normalizedCellName = layer.cellName ? normalizeNeighborIdentifier(layer.cellName) : '';
+        const isSourceLayer = normalizedCellName && normalizedCellName === sourceCellName;
+        const isTargetLayer = targetIdentifiers.has(layer.siteName + '_' + layer.azimut);
+        if (!isSourceLayer && !isTargetLayer) return;
+
+        layer.setStyle({
+            weight: 2,
+            color: '#ff0000',
+            fillColor: '#ff0000',
+            fillOpacity: 1
+        });
+    });
+}
 
 // Helper to get siteKey and azimut for a specific cell
 window.getCellSiteAndAzimuth = function(cellNameRaw) {
     if (!bddData.sitesConfig) return null;
-    const sName = cellNameRaw.substring(0, cellNameRaw.length - 1);
-    const baseSName = sName.replace(/^[234]G_/i, '').replace(/_\d+$/, '');
-    const baseKey = Object.keys(bddData.sitesConfig).find(k => k.toLowerCase() === baseSName.toLowerCase() || k.toLowerCase().includes(baseSName.toLowerCase()));
-    if (!baseKey) return null;
-    
-    const site = bddData.sitesConfig[baseKey];
-    const cell = site.cells.find(c => c.name.toLowerCase() === cellNameRaw.toLowerCase());
-    if (!cell) return null;
+    const normalizedCellName = normalizeNeighborIdentifier(cellNameRaw);
+    if (!normalizedCellName) return null;
 
-    return { siteKey: baseKey, azimut: cell.azimut };
+    const parentCellName = normalizedCellName.length > 1 ? normalizedCellName.slice(0, -1) : normalizedCellName;
+    const normalizedBaseSite = normalizeNeighborSiteKey(parentCellName);
+
+    const siteKeys = Object.keys(bddData.sitesConfig);
+    let matchedSiteKey = siteKeys.find((siteKey) => {
+        const normalizedSiteKey = normalizeNeighborSiteKey(siteKey);
+        return (
+            normalizedSiteKey === normalizedBaseSite
+            || normalizedSiteKey.includes(normalizedBaseSite)
+            || normalizedBaseSite.includes(normalizedSiteKey)
+        );
+    }) || null;
+
+    if (matchedSiteKey) {
+        const matchedCell = bddData.sitesConfig[matchedSiteKey].cells.find(
+            (cell) => normalizeNeighborIdentifier(cell.name) === normalizedCellName
+        );
+        if (matchedCell) {
+            return { siteKey: matchedSiteKey, azimut: matchedCell.azimut };
+        }
+    }
+
+    for (const siteKey of siteKeys) {
+        const site = bddData.sitesConfig[siteKey];
+        const matchedCell = site.cells.find(
+            (cell) => normalizeNeighborIdentifier(cell.name) === normalizedCellName
+        );
+        if (matchedCell) {
+            return { siteKey, azimut: matchedCell.azimut };
+        }
+    }
+
+    return null;
 };
 
 function plotBDDSites() {
@@ -1710,24 +1816,20 @@ function plotBDDSites() {
                 
                 if (sliceCell) {
                     poly.cellName = sliceCell.name;
-                    window.polygonsByCellName[sliceCell.name.toLowerCase()] = poly;
+                    window.polygonsByCellName[normalizeNeighborIdentifier(sliceCell.name)] = poly;
                     
                     poly.on('click', function(e) {
                         if (!window.isNeighborsLoaded || !window.neighborPairs) return;
-                        
-                        // Clear old highlights and reset to original colors
-                        bddMapLayers.forEach(l => {
-                            if (l.isSector) {
-                                l.setStyle({ weight: 1, color: l.originalColor, fillColor: l.originalColor, fillOpacity: 0.8 });
-                            }
-                        });
-                        
-                        let myCellName = poly.cellName.toLowerCase();
+
+                        window.activeNeighborHighlight = null;
+                        resetNeighborSectorHighlights();
+
+                        let myCellName = normalizeNeighborIdentifier(poly.cellName);
                         let targetIdentifiers = new Set();
                         
                         // Find targets for this source cell
                         window.neighborPairs.forEach(pair => {
-                            if (pair.src.toLowerCase() === myCellName) {
+                            if (normalizeNeighborIdentifier(pair.src) === myCellName) {
                                 const tgtInfo = window.getCellSiteAndAzimuth(pair.tgt);
                                 if (tgtInfo) {
                                     if (!(tgtInfo.siteKey === poly.siteName && tgtInfo.azimut === poly.azimut)) {
@@ -1738,16 +1840,12 @@ function plotBDDSites() {
                         });
                         
                         if (targetIdentifiers.size === 0) return;
-                        
-                        // Color all layers related to the target sectors RED
-                        bddMapLayers.forEach(l => {
-                            if (l.isSector && targetIdentifiers.has(l.siteName + '_' + l.azimut)) {
-                                l.setStyle({ weight: 2, color: '#ff0000', fillColor: '#ff0000', fillOpacity: 1 });
-                            }
-                        });
-                        
-                        // Color the specific clicked SA layer RED as well
-                        poly.setStyle({ weight: 2, color: '#ff0000', fillColor: '#ff0000', fillOpacity: 1 });
+
+                        window.activeNeighborHighlight = {
+                            sourceCellName: myCellName,
+                            targetIdentifiers: Array.from(targetIdentifiers)
+                        };
+                        applyNeighborSectorHighlights();
                         
                         L.DomEvent.stopPropagation(e);
                     });
@@ -1755,6 +1853,8 @@ function plotBDDSites() {
             }
         });
     });
+
+    applyNeighborSectorHighlights();
 }
 
 // Neighbors File Check
@@ -1846,28 +1946,16 @@ if (neighborsFileInput) {
 
             window.neighborPairs = neighborPairs;
             window.isNeighborsLoaded = true;
+            window.activeNeighborHighlight = null;
 
             // Clear any existing lines
             neighborLines.forEach(l => map.removeLayer(l));
             neighborLines = [];
-            bddMapLayers.forEach(l => {
-                if (l.isSector) {
-                    l.setStyle({ weight: 1, color: l.options.fillColor, fillOpacity: 0.8 });
-                }
-            });
+            resetNeighborSectorHighlights();
 
             checkNeighborsBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg> Loaded (Click Sector)`;
             checkNeighborsBtn.classList.add('loaded');
             legendNeighborItem.style.display = 'flex';
-            
-            // Add a map click listener to clear colors when clicking empty space
-            map.on('click', function() {
-                bddMapLayers.forEach(l => {
-                    if (l.isSector) {
-                        l.setStyle({ weight: 1, color: l.originalColor, fillColor: l.originalColor, fillOpacity: 0.8 });
-                    }
-                });
-            });
 
         } catch (err) {
             console.error(err);
